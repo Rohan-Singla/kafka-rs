@@ -1,0 +1,27 @@
+[package]
+name = "kafka-rust"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "broker"
+path = "src/bin/broker.rs"
+
+[lib]
+name = "kafka_rust"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = "1.12.0"
+crc32fast = "1.5.0"
+dashmap = "6.2.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+
+[dev-dependencies]
+tempfile = "3"
