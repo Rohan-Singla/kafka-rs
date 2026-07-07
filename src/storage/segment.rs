@@ -15,7 +15,7 @@ pub struct Segment {
 
 impl Segment {
     pub fn new(dir: &PathBuf, base_offset: u64) -> io::Result<Self> {
-        // 20-digit zero-padded filenames so they sort correctly on disk
+        // zero-padded so filenames sort by offset on disk
         let log_path = dir.join(format!("{:020}.log", base_offset));
         let idx_path = dir.join(format!("{:020}.idx", base_offset));
 
@@ -49,13 +49,11 @@ impl Segment {
             .unwrap()
             .as_millis() as u64;
 
-        // log format: [offset 8B][timestamp 8B][length 4B][message NB]
         self.log_file.write_all(&offset.to_be_bytes())?;
         self.log_file.write_all(&timestamp.to_be_bytes())?;
         self.log_file.write_all(&(message.len() as u32).to_be_bytes())?;
         self.log_file.write_all(message)?;
 
-        // index format: [offset 8B][log_byte_position 8B]
         self.index_file.write_all(&offset.to_be_bytes())?;
         self.index_file.write_all(&self.log_position.to_be_bytes())?;
 
@@ -67,8 +65,7 @@ impl Segment {
     }
 
     pub fn read(&mut self, offset: u64) -> io::Result<Vec<u8>> {
-        // each index entry is [offset 8B][log_position 8B] = 16 bytes
-        // +8 skips the stored offset bytes and lands on the log_position bytes
+        // +8 skips the stored offset field to land directly on log_position
         let idx_pos = (offset - self.base_offset) * 16 + 8;
         self.index_file.seek(SeekFrom::Start(idx_pos))?;
 
@@ -78,7 +75,6 @@ impl Segment {
 
         self.log_file.seek(SeekFrom::Start(log_pos))?;
 
-        // skip stored offset (8 bytes) and timestamp (8 bytes)
         self.log_file.seek(SeekFrom::Current(16))?;
 
         let mut len_buf = [0u8; 4];

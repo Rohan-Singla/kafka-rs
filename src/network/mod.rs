@@ -6,8 +6,6 @@ use tokio::{
 use serde::{Deserialize, Serialize};
 use crate::broker::Broker;
 
-// ── Protocol types ────────────────────────────────────────────────────────────
-
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
@@ -33,8 +31,6 @@ pub struct Message {
     pub value: String,
 }
 
-// ── Server ────────────────────────────────────────────────────────────────────
-
 pub async fn run(broker: Arc<Broker>, addr: &str) -> io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("broker listening on {}", addr);
@@ -53,21 +49,18 @@ pub async fn run(broker: Arc<Broker>, addr: &str) -> io::Result<()> {
 
 async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> io::Result<()> {
     loop {
-        // read 4-byte length prefix
         let mut len_buf = [0u8; 4];
         match socket.read_exact(&mut len_buf).await {
             Ok(_) => {}
-            // client disconnected cleanly
+            // UnexpectedEof = client closed the connection normally
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(e),
         }
         let len = u32::from_be_bytes(len_buf) as usize;
 
-        // read request body
         let mut buf = vec![0u8; len];
         socket.read_exact(&mut buf).await?;
 
-        // handle and write response
         let response = handle_request(&buf, &broker);
         let response_bytes = serde_json::to_vec(&response).unwrap();
         socket.write_all(&(response_bytes.len() as u32).to_be_bytes()).await?;
