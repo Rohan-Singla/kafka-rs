@@ -1,3 +1,7 @@
 /target
-CLAUDE.md
 /data
+CLAUDE.md
+
+# macOS
+.DS_Store
+**/.DS_Store
