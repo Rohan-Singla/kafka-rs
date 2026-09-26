@@ -1,115 +1,199 @@
-use std::{io, sync::Arc};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-};
-use serde::{Deserialize, Serialize};
+pub mod codec;
+pub mod protocol;
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use tokio::net::{TcpListener, TcpStream};
+
 use crate::broker::Broker;
+use crate::error::Result;
+use protocol::{CommittedOffset, Message, Request, Response};
 
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum Request {
-    CreateTopic { name: String, partitions: u32 },
-    Produce     { topic: String, partition: u32, message: String },
-    Fetch       { topic: String, partition: u32, offset: u64, max_count: usize },
-    CommitOffset{ group: String, topic: String, partition: u32, offset: u64 },
-    FetchOffset { group: String, topic: String, partition: u32 },
+pub use codec::MAX_FRAME_SIZE;
+
+pub struct Server {
+    listener: TcpListener,
+    broker: Arc<Broker>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum Response {
-    Ok,
-    Offset   { offset: u64 },
-    Messages { messages: Vec<Message> },
-    Error    { reason: String },
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Message {
-    pub offset: u64,
-    pub value: String,
-}
-
-pub async fn run(broker: Arc<Broker>, addr: &str) -> io::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!("broker listening on {}", addr);
-
-    loop {
-        let (socket, peer) = listener.accept().await?;
-        tracing::info!("connection from {}", peer);
-        let broker = Arc::clone(&broker);
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(socket, broker).await {
-                tracing::error!("connection closed: {}", e);
-            }
-        });
+impl Server {
+    pub async fn bind(broker: Arc<Broker>, addr: &str) -> Result<Self> {
+        let listener = TcpListener::bind(addr).await?;
+        Ok(Self { listener, broker })
     }
-}
 
-async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> io::Result<()> {
-    loop {
-        let mut len_buf = [0u8; 4];
-        match socket.read_exact(&mut len_buf).await {
-            Ok(_) => {}
-            // UnexpectedEof = client closed the connection normally
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            Err(e) => return Err(e),
+    /// The address actually bound. Binding to port 0 asks the OS for a free
+    /// port, which is how the tests avoid fighting over 9092.
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        Ok(self.listener.local_addr()?)
+    }
+
+    /// Accept forever, giving every connection its own task.
+    ///
+    /// A task is a few kilobytes of heap rather than a thread's worth of stack,
+    /// so idle connections cost close to nothing.
+    pub async fn run(self) -> Result<()> {
+        tracing::info!("broker listening on {}", self.local_addr()?);
+
+        loop {
+            let (socket, peer) = match self.listener.accept().await {
+                Ok(pair) => pair,
+                // One failed accept (a file descriptor limit, a peer that hung
+                // up during the handshake) must not take the broker down.
+                Err(e) => {
+                    tracing::warn!("accept failed: {}", e);
+                    continue;
+                }
+            };
+
+            let broker = Arc::clone(&self.broker);
+            tokio::spawn(async move {
+                tracing::debug!("connection from {}", peer);
+                if let Err(e) = handle_connection(socket, broker).await {
+                    tracing::warn!("connection from {} ended: {}", peer, e);
+                }
+            });
         }
-        let len = u32::from_be_bytes(len_buf) as usize;
-
-        let mut buf = vec![0u8; len];
-        socket.read_exact(&mut buf).await?;
-
-        let response = handle_request(&buf, &broker);
-        let response_bytes = serde_json::to_vec(&response).unwrap();
-        socket.write_all(&(response_bytes.len() as u32).to_be_bytes()).await?;
-        socket.write_all(&response_bytes).await?;
     }
 }
 
-fn handle_request(buf: &[u8], broker: &Broker) -> Response {
-    let request: Request = match serde_json::from_slice(buf) {
-        Ok(r) => r,
-        Err(e) => return Response::Error { reason: e.to_string() },
-    };
+async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
+    // Requests are small and latency sensitive, so do not let Nagle sit on them
+    // waiting for more bytes to coalesce.
+    let _ = socket.set_nodelay(true);
 
+    loop {
+        let frame = match codec::read_frame(&mut socket).await {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                // Tell the client why before dropping it, when we still can.
+                let response = Response::Error {
+                    reason: e.to_string(),
+                };
+                let _ = codec::write_frame(&mut socket, &serde_json::to_vec(&response)?).await;
+                return Err(e);
+            }
+        };
+
+        let response = match serde_json::from_slice::<Request>(&frame) {
+            Ok(request) => dispatch(request, &broker).await,
+            Err(e) => Response::Error {
+                reason: format!("malformed request: {}", e),
+            },
+        };
+
+        codec::write_frame(&mut socket, &serde_json::to_vec(&response)?).await?;
+    }
+}
+
+/// Turn one request into one response. Every broker error becomes a protocol
+/// level error rather than tearing down the connection.
+pub async fn dispatch(request: Request, broker: &Broker) -> Response {
     match request {
         Request::CreateTopic { name, partitions } => match broker.create_topic(&name, partitions) {
-            Ok(_) => Response::Ok,
-            Err(e) => Response::Error { reason: e.to_string() },
+            Ok(()) => Response::Ok,
+            Err(e) => e.into(),
         },
 
-        Request::Produce { topic, partition, message } => {
-            match broker.produce(&topic, partition, message.as_bytes()) {
-                Ok(offset) => Response::Offset { offset },
-                Err(e) => Response::Error { reason: e.to_string() },
-            }
-        }
+        Request::Produce {
+            topic,
+            partition,
+            message,
+        } => match broker.produce(&topic, partition, message.into_bytes()).await {
+            Ok(offset) => Response::Offset { offset },
+            Err(e) => e.into(),
+        },
 
-        Request::Fetch { topic, partition, offset, max_count } => {
-            match broker.fetch(&topic, partition, offset, max_count) {
-                Ok(msgs) => Response::Messages {
-                    messages: msgs
-                        .into_iter()
-                        .map(|(offset, bytes)| Message {
-                            offset,
-                            value: String::from_utf8_lossy(&bytes).to_string(),
-                        })
-                        .collect(),
-                },
-                Err(e) => Response::Error { reason: e.to_string() },
-            }
-        }
+        Request::Fetch {
+            topic,
+            partition,
+            offset,
+            max_count,
+        } => match broker.fetch(&topic, partition, offset, max_count).await {
+            Ok(records) => Response::Messages {
+                messages: records.into_iter().map(Message::from).collect(),
+            },
+            Err(e) => e.into(),
+        },
 
-        Request::CommitOffset { group, topic, partition, offset } => {
-            broker.commit_offset(&group, &topic, partition, offset);
-            Response::Ok
-        }
+        Request::CommitOffset {
+            group,
+            topic,
+            partition,
+            offset,
+        } => match broker.commit_offset(&group, &topic, partition, offset) {
+            Ok(()) => Response::Ok,
+            Err(e) => e.into(),
+        },
 
-        Request::FetchOffset { group, topic, partition } => {
-            let offset = broker.fetch_offset(&group, &topic, partition);
-            Response::Offset { offset }
+        Request::FetchOffset {
+            group,
+            topic,
+            partition,
+        } => Response::Offset {
+            offset: broker.fetch_offset(&group, &topic, partition),
+        },
+
+        Request::ListTopics => Response::Topics {
+            topics: broker.list_topics(),
+        },
+
+        Request::DescribeTopic { topic } => match broker.describe_topic(&topic) {
+            Ok(info) => Response::Topic { topic: info },
+            Err(e) => e.into(),
+        },
+
+        Request::JoinGroup { group, topics } => match broker.join_group(&group, topics) {
+            Ok(assignment) => Response::Assignment {
+                member_id: assignment.member_id,
+                generation: assignment.generation,
+                partitions: assignment.partitions,
+            },
+            Err(e) => e.into(),
+        },
+
+        Request::Heartbeat { group, member_id } => match broker.heartbeat(&group, &member_id) {
+            Ok(assignment) => Response::Assignment {
+                member_id: assignment.member_id,
+                generation: assignment.generation,
+                partitions: assignment.partitions,
+            },
+            Err(e) => e.into(),
+        },
+
+        Request::LeaveGroup { group, member_id } => match broker.leave_group(&group, &member_id) {
+            Ok(()) => Response::Ok,
+            Err(e) => e.into(),
+        },
+
+        Request::ListGroups => Response::Groups {
+            groups: broker.list_groups(),
+        },
+
+        Request::DescribeGroup { group } => match broker.describe_group(&group) {
+            Ok(description) => Response::Group {
+                committed: broker
+                    .committed_offsets(&group)
+                    .into_iter()
+                    .map(|(topic, partition, offset)| CommittedOffset {
+                        topic,
+                        partition,
+                        offset,
+                    })
+                    .collect(),
+                group: description,
+            },
+            Err(e) => e.into(),
+        },
+    }
+}
+
+impl From<crate::error::Error> for Response {
+    fn from(e: crate::error::Error) -> Self {
+        Response::Error {
+            reason: e.to_string(),
         }
     }
 }
