@@ -1,68 +1,57 @@
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use serde_json::{json, Value};
+//! Reads the orders topic as a member of a consumer group.
+//!
+//! Start the broker and run the producer first, then:
+//!     cargo run --example consumer
+//!
+//! Run it twice. The second run resumes from the committed offset instead of
+//! replaying, because the commit is on disk rather than in the broker's memory.
 
-fn send(stream: &mut TcpStream, request: Value) -> Value {
-    let bytes = serde_json::to_vec(&request).unwrap();
-    stream.write_all(&(bytes.len() as u32).to_be_bytes()).unwrap();
-    stream.write_all(&bytes).unwrap();
+use kafka_rust::client::Consumer;
 
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).unwrap();
-    let mut buf = vec![0u8; u32::from_be_bytes(len_buf) as usize];
-    stream.read_exact(&mut buf).unwrap();
-    serde_json::from_slice(&buf).unwrap()
-}
+#[tokio::main]
+async fn main() -> kafka_rust::Result<()> {
+    let mut consumer = Consumer::connect("127.0.0.1:9092").await?;
 
-fn main() {
-    let mut stream = TcpStream::connect("127.0.0.1:9092").expect("could not connect — is the broker running?");
+    consumer.subscribe("order-processors", &["orders"]).await?;
+    println!(
+        "joined group 'order-processors' as {} (generation {})",
+        consumer.member_id().unwrap_or("?"),
+        consumer.generation()
+    );
 
-    let group     = "my-group";
-    let topic     = "orders";
-    let partition = 0u32;
+    let owned: Vec<String> = consumer
+        .assignment()
+        .iter()
+        .map(|tp| format!("{}:{}", tp.topic, tp.partition))
+        .collect();
+    println!("assigned partitions: {}\n", owned.join(" "));
 
-    // find out where this consumer group left off
-    let resp = send(&mut stream, json!({
-        "type": "FetchOffset",
-        "group": group,
-        "topic": topic,
-        "partition": partition
-    }));
-    let start_offset = resp["offset"].as_u64().unwrap_or(0);
-    println!("resuming from offset {}", start_offset);
-
-    // fetch up to 10 messages
-    let resp = send(&mut stream, json!({
-        "type": "Fetch",
-        "topic": topic,
-        "partition": partition,
-        "offset": start_offset,
-        "max_count": 10
-    }));
-
-    let empty = vec![];
-    let messages = resp["messages"].as_array().unwrap_or(&empty);
-
-    if messages.is_empty() {
-        println!("no new messages");
-        return;
+    // poll() returns one partition's batch at a time and rotates between the
+    // assigned partitions, so keep polling until it comes back empty.
+    let mut total = 0;
+    loop {
+        let records = consumer.poll(10).await?;
+        if records.is_empty() {
+            break;
+        }
+        for record in records {
+            println!(
+                "partition {} offset {:<3} {}",
+                record.partition, record.offset, record.value
+            );
+            total += 1;
+        }
     }
 
-    let mut last_offset = start_offset;
-    for msg in messages {
-        let offset = msg["offset"].as_u64().unwrap_or(0);
-        let value  = msg["value"].as_str().unwrap_or("");
-        println!("offset {} → {}", offset, value);
-        last_offset = offset;
+    if total == 0 {
+        println!("no new messages, everything up to the committed offset was already read");
+    } else {
+        consumer.commit().await?;
+        println!("\nread {} message(s) and committed", total);
     }
 
-    // commit next offset so we don't re-read on the next run
-    send(&mut stream, json!({
-        "type": "CommitOffset",
-        "group": group,
-        "topic": topic,
-        "partition": partition,
-        "offset": last_offset + 1
-    }));
-    println!("committed offset {}", last_offset + 1);
+    // Leaving lets the rest of the group rebalance now rather than after the
+    // session timeout.
+    consumer.leave().await?;
+    Ok(())
 }

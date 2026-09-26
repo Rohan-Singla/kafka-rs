@@ -1,38 +1,45 @@
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use serde_json::{json, Value};
+//! Writes a batch of orders, spread across partitions.
+//!
+//! Start the broker first:
+//!     cargo run --bin broker
+//!
+//! Then:
+//!     cargo run --example producer
 
-fn send(stream: &mut TcpStream, request: Value) -> Value {
-    let bytes = serde_json::to_vec(&request).unwrap();
-    stream.write_all(&(bytes.len() as u32).to_be_bytes()).unwrap();
-    stream.write_all(&bytes).unwrap();
+use kafka_rust::client::Producer;
 
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).unwrap();
-    let mut buf = vec![0u8; u32::from_be_bytes(len_buf) as usize];
-    stream.read_exact(&mut buf).unwrap();
-    serde_json::from_slice(&buf).unwrap()
-}
+#[tokio::main]
+async fn main() -> kafka_rust::Result<()> {
+    let mut producer = Producer::connect("127.0.0.1:9092").await?;
 
-fn main() {
-    let mut stream = TcpStream::connect("127.0.0.1:9092").expect("could not connect — is the broker running?");
+    producer.create_topic("orders", 3).await?;
+    println!("topic 'orders' ready with 3 partitions\n");
 
-    // create topic with 2 partitions
-    let resp = send(&mut stream, json!({
-        "type": "CreateTopic",
-        "name": "orders",
-        "partitions": 2
-    }));
-    println!("create topic → {:?}", resp);
-
-    // send 5 messages to partition 0
-    for i in 1..=5 {
-        let resp = send(&mut stream, json!({
-            "type": "Produce",
-            "topic": "orders",
-            "partition": 0,
-            "message": format!("order #{}", i)
-        }));
-        println!("produced → {:?}", resp);
+    // send() rotates through partitions, so the three logs fill evenly.
+    for i in 1..=9 {
+        let message = format!("order #{}", i);
+        let offset = producer.send("orders", &message).await?;
+        println!("{:<12} -> offset {}", message, offset);
     }
+
+    // Pin related messages to one partition when their order matters: ordering
+    // is only guaranteed inside a single partition.
+    println!();
+    for status in ["created", "paid", "shipped"] {
+        let message = format!("order #42 {}", status);
+        let offset = producer.send_to("orders", 0, &message).await?;
+        println!("{:<20} -> partition 0, offset {}", message, offset);
+    }
+
+    println!("\ntopic state:");
+    for partition in producer.describe_topic("orders").await?.partitions {
+        println!(
+            "  partition {} holds {} message(s), {} bytes",
+            partition.partition,
+            partition.next_offset - partition.start_offset,
+            partition.size_bytes
+        );
+    }
+
+    Ok(())
 }
