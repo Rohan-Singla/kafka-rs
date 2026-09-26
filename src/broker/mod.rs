@@ -288,21 +288,23 @@ impl Broker {
         offset: u64,
     ) -> Result<()> {
         let handle = self.partition_handle(topic, partition)?;
-        let next_offset = {
-            let guard = handle.read().unwrap_or_else(|e| e.into_inner());
-            guard.next_offset()
-        };
-        if offset > next_offset {
-            return Err(Error::OffsetOutOfRange {
-                offset,
-                next_offset,
-            });
-        }
-
         let offsets = Arc::clone(&self.offsets);
         let (group, topic) = (group.to_string(), topic.to_string());
 
-        spawn_blocking(move || offsets.commit(&group, &topic, partition, offset)).await
+        spawn_blocking(move || {
+            let next_offset = {
+                let guard = handle.read().unwrap_or_else(|e| e.into_inner());
+                guard.next_offset()
+            };
+            if offset > next_offset {
+                return Err(Error::OffsetOutOfRange {
+                    offset,
+                    next_offset,
+                });
+            }
+            offsets.commit(&group, &topic, partition, offset)
+        })
+        .await
     }
 
     pub fn fetch_offset(&self, group: &str, topic: &str, partition: u32) -> u64 {

@@ -18,7 +18,7 @@ pub struct OffsetStore {
 }
 
 struct Journal {
-    file: File,
+    file: Option<File>,
     appends: u64,
 }
 
@@ -43,14 +43,21 @@ impl OffsetStore {
 
         Self::compact(&path, &offsets)?;
 
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = Self::open_journal(&path)?;
 
         Ok(Self {
             path,
-            journal: Mutex::new(Journal { file, appends: 0 }),
+            journal: Mutex::new(Journal {
+                file: Some(file),
+                appends: 0,
+            }),
             offsets,
             fsync,
         })
+    }
+
+    fn open_journal(path: &Path) -> Result<File> {
+        Ok(OpenOptions::new().create(true).append(true).open(path)?)
     }
 
     fn replay(path: &Path) -> Result<DashMap<OffsetKey, u64>> {
@@ -117,10 +124,18 @@ impl OffsetStore {
         })?;
 
         let mut journal = self.journal.lock().unwrap_or_else(|e| e.into_inner());
-        journal.file.write_all(line.as_bytes())?;
-        journal.file.write_all(b"\n")?;
+        if journal.file.is_none() {
+            journal.file = Some(Self::open_journal(&self.path)?);
+        }
+        let file = journal
+            .file
+            .as_mut()
+            .expect("the journal was just reopened");
+
+        file.write_all(line.as_bytes())?;
+        file.write_all(b"\n")?;
         if self.fsync {
-            journal.file.sync_data()?;
+            file.sync_data()?;
         }
         journal.appends += 1;
 
@@ -136,11 +151,9 @@ impl OffsetStore {
         if journal.appends >= COMPACT_AFTER_APPENDS
             && journal.appends >= 2 * self.offsets.len() as u64
         {
+            journal.file = None;
             Self::compact(&self.path, &self.offsets)?;
-            journal.file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)?;
+            journal.file = Some(Self::open_journal(&self.path)?);
             journal.appends = 0;
         }
 
