@@ -34,6 +34,22 @@ It skips two things:
   `Vec`, so a missing `partition-1` would silently shift `partition-2` into slot
   1 and hand readers the wrong log. Refusing to load is the safe answer.
 
+### Creating a topic twice
+
+`create_topic` with the same partition count is a no-op, so clients can call it
+on startup without checking first. With a **different** count it is an error.
+
+Returning success there would be a lie with consequences: the caller believes it
+has 8 partitions, produces to partition 5, and gets "no partition 5" from a
+topic it just successfully created. Refusing puts the error where the mistake
+is.
+
+The whole check-and-create runs under a mutex. Topic creation is rare, so a
+single lock costs nothing, and it removes a race where two connections both see
+"topic does not exist" and both open the same segment files. The second insert
+would win the registry while a producer kept appending through the first,
+orphaned `Partition` with its own idea of the next offset.
+
 ### Topic names are validated
 
 ```rust
@@ -168,14 +184,20 @@ panicked while holding the lock, Rust marks it poisoned and normally every later
 `lock()` fails forever. Here the partition's state is only updated after a
 successful write, so recovering is safe and beats bricking the partition.
 
-### 3. Fetch counts are clamped
+### 3. Fetches are clamped twice
 
 ```rust
-let max_count = max_count.clamp(1, MAX_FETCH_COUNT);   // 10,000
+let max_count = max_count.clamp(1, MAX_FETCH_COUNT);
+guard.read_from(offset, max_count, MAX_FETCH_BYTES)
 ```
 
-Otherwise a client asking for `usize::MAX` records makes the broker try to build
-an unbounded response.
+A count cap alone stops `usize::MAX` records being requested, but 10,000 records
+of 8MB each still comes to 80GB. The byte budget is the cap that actually
+bounds memory, and it also keeps the response under the 16MB frame limit, since
+a response that cannot be framed cannot be delivered at all.
+
+`commit_offset` also goes through `spawn_blocking`, for the same reason as
+`produce`: with `--fsync` on, it does a real disk sync.
 
 ## fsync, and the 366x
 

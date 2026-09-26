@@ -91,6 +91,17 @@ next_position = current_position + 24 + length
 That is why fetching 500 records is barely more expensive than fetching one, and
 why the consume benchmark is an order of magnitude faster than produce.
 
+### A batch is bounded by bytes, not just count
+
+`read_from` takes both a `max_count` and a `max_bytes` budget, and stops at
+whichever it hits first. Count alone is not enough: 10,000 records of 8MB each
+is 80GB, which would be assembled in memory before anyone noticed.
+
+One exception keeps a consumer from deadlocking. If the very first record is
+larger than the whole budget, it is returned anyway. Otherwise a consumer whose
+next message is bigger than the limit would fetch nothing, forever, and never
+advance past it.
+
 ## Crash recovery
 
 The important part.
@@ -187,9 +198,22 @@ Finding which segment holds an offset is a binary search over base offsets, in
 `read_from` keeps pulling from successive segments until it has enough records
 or runs out of log.
 
-One edge case worth knowing: a crash right after rolling can leave an empty
-trailing segment. `Partition::with_segment_size` deletes those on open, so the
-active segment is always the one holding the highest offset.
+Two edge cases worth knowing.
+
+**An empty trailing segment.** A crash right after rolling can leave one.
+`Partition::with_segment_size` deletes those on open, so the active segment is
+always the one holding the highest offset.
+
+**A hole in the middle.** Segments recover independently, so corruption in a
+sealed middle segment truncates that segment and leaves a gap between it and
+the next one. `read_from` detects this (the segment holding the offset reports
+nothing, and the offset is past that segment's end), logs a warning, and
+resumes at the next segment's base offset.
+
+Without that, everything after the hole would be silently unreachable through
+sequential reads while still being visible to point reads: the worst kind of
+bug, because the data looks present but never arrives. Covered by
+`a_hole_in_a_sealed_segment_does_not_hide_later_records`.
 
 ## Positional I/O
 

@@ -29,6 +29,19 @@ cargo run --release --bin kafka-cli -- describe orders
 cargo run --release --bin kafka-cli -- describe-group order-processors
 ```
 
+## Documentation
+
+The code carries no comments, so the design reasoning lives in [`docs/`](docs/):
+
+| | |
+|---|---|
+| [Mental model](docs/01-mental-model.md) | Topics, partitions, offsets, segments, groups |
+| [Storage engine](docs/02-storage-engine.md) | The bytes on disk, the index, crash recovery |
+| [Network protocol](docs/03-network-protocol.md) | Framing, the wire format, every request |
+| [Broker and groups](docs/04-broker-and-groups.md) | Registry, durable offsets, assignment, concurrency |
+| [Code tour](docs/05-code-tour.md) | File by file, what to read first |
+| [Rust notes](docs/06-rust-notes.md) | The language features doing real work here |
+
 ## Why
 
 Real Kafka runs on the JVM. The garbage collector pauses to reclaim memory, and those pauses land in the tail of your latency distribution exactly when you are moving the most data. Rust has no garbage collector, so the p99 is a property of the work being done rather than of when the runtime decides to collect.
