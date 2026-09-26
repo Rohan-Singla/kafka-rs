@@ -23,24 +23,16 @@ impl Server {
         Ok(Self { listener, broker })
     }
 
-    /// The address actually bound. Binding to port 0 asks the OS for a free
-    /// port, which is how the tests avoid fighting over 9092.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.listener.local_addr()?)
     }
 
-    /// Accept forever, giving every connection its own task.
-    ///
-    /// A task is a few kilobytes of heap rather than a thread's worth of stack,
-    /// so idle connections cost close to nothing.
     pub async fn run(self) -> Result<()> {
         tracing::info!("broker listening on {}", self.local_addr()?);
 
         loop {
             let (socket, peer) = match self.listener.accept().await {
                 Ok(pair) => pair,
-                // One failed accept (a file descriptor limit, a peer that hung
-                // up during the handshake) must not take the broker down.
                 Err(e) => {
                     tracing::warn!("accept failed: {}", e);
                     continue;
@@ -59,8 +51,6 @@ impl Server {
 }
 
 async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
-    // Requests are small and latency sensitive, so do not let Nagle sit on them
-    // waiting for more bytes to coalesce.
     let _ = socket.set_nodelay(true);
 
     loop {
@@ -68,7 +58,6 @@ async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> Result
             Ok(Some(frame)) => frame,
             Ok(None) => return Ok(()),
             Err(e) => {
-                // Tell the client why before dropping it, when we still can.
                 let response = Response::Error {
                     reason: e.to_string(),
                 };
@@ -88,8 +77,6 @@ async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> Result
     }
 }
 
-/// Turn one request into one response. Every broker error becomes a protocol
-/// level error rather than tearing down the connection.
 pub async fn dispatch(request: Request, broker: &Broker) -> Response {
     match request {
         Request::CreateTopic { name, partitions } => match broker.create_topic(&name, partitions) {
@@ -101,7 +88,10 @@ pub async fn dispatch(request: Request, broker: &Broker) -> Response {
             topic,
             partition,
             message,
-        } => match broker.produce(&topic, partition, message.into_bytes()).await {
+        } => match broker
+            .produce(&topic, partition, message.into_bytes())
+            .await
+        {
             Ok(offset) => Response::Offset { offset },
             Err(e) => e.into(),
         },

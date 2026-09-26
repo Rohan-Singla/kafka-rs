@@ -6,17 +6,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     Io(io::Error),
     Codec(serde_json::Error),
-    /// A record failed its checksum or framing sanity check while being read
-    /// back from disk. Carries the byte position so a corrupt segment can be
-    /// pinpointed without re-scanning.
     Corrupt { position: u64, detail: String },
     FrameTooLarge { size: usize, max: usize },
     UnknownTopic(String),
     UnknownPartition { topic: String, partition: u32 },
     UnknownGroup(String),
     UnknownMember { group: String, member: String },
-    /// The client is acting on an assignment from a previous generation, which
-    /// means a rebalance happened while it was away. It must rejoin.
     StaleGeneration { expected: u64, got: u64 },
     OffsetOutOfRange { offset: u64, next_offset: u64 },
     InvalidTopicName(String),

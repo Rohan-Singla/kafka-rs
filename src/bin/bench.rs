@@ -1,8 +1,8 @@
 use std::process;
 use std::time::Instant;
 
-use kafka_rust::client::{Consumer, Producer};
 use kafka_rust::Result;
+use kafka_rust::client::{Consumer, Producer};
 
 const USAGE: &str = "\
 mini-kafka benchmark
@@ -55,8 +55,6 @@ async fn main() {
 }
 
 async fn run(config: Config) -> Result<()> {
-    // One partition per producer, so writers never queue behind each other on
-    // the same partition lock. This is the parallelism the design is built for.
     let partitions = config.producers as u32;
     let per_producer = config.messages / config.producers;
     let total = per_producer * config.producers;
@@ -69,8 +67,6 @@ async fn run(config: Config) -> Result<()> {
     println!("  payload     {} bytes", config.size);
     println!();
 
-    // Record where each partition already ends, so a rerun against an existing
-    // topic measures this run's messages rather than everything ever written.
     let topic = config.topic.clone();
     let mut setup = Producer::connect(&config.broker).await?;
     setup.create_topic(&topic, partitions).await?;
@@ -114,7 +110,7 @@ async fn run(config: Config) -> Result<()> {
                 return Err(kafka_rust::Error::Protocol(format!(
                     "producer task panicked: {}",
                     e
-                )))
+                )));
             }
         }
     }
@@ -128,7 +124,6 @@ async fn run(config: Config) -> Result<()> {
     report_latency(&latencies);
     println!();
 
-    // Read everything back, starting from where the topic was before this run.
     let consume_start = Instant::now();
     let mut consumed = 0usize;
     let mut fetch_latencies = Vec::new();
@@ -153,17 +148,21 @@ async fn run(config: Config) -> Result<()> {
     let consume_elapsed = consume_start.elapsed();
     fetch_latencies.sort_unstable();
 
-    println!("CONSUME  ({} messages read back in batches of {})", consumed, config.batch);
-    report_throughput(consumed, (consumed * config.size) as f64, consume_elapsed.as_secs_f64());
+    println!(
+        "CONSUME  ({} messages read back in batches of {})",
+        consumed, config.batch
+    );
+    report_throughput(
+        consumed,
+        (consumed * config.size) as f64,
+        consume_elapsed.as_secs_f64(),
+    );
     println!("  fetch call latency");
     report_latency(&fetch_latencies);
 
     if consumed != total {
         println!();
-        println!(
-            "WARNING: produced {} but read back {}",
-            total, consumed
-        );
+        println!("WARNING: produced {} but read back {}", total, consumed);
     }
     Ok(())
 }

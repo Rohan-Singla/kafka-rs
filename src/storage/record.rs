@@ -1,17 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// On-disk record layout:
-///
-/// ```text
-/// offset (8) | timestamp (8) | crc (4) | length (4) | payload (N)
-/// ```
-///
-/// All integers are big endian so a hex dump of the log reads left to right.
 pub const HEADER_LEN: usize = 24;
 
-/// Ceiling on a single record's payload. Anything larger in a header is taken
-/// as corruption rather than a real length, which stops a garbled length field
-/// from triggering a huge allocation during recovery.
 pub const MAX_RECORD_SIZE: u32 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,8 +25,6 @@ pub struct Header {
     pub length: u32,
 }
 
-/// The checksum covers the offset, timestamp and length alongside the payload,
-/// so a bit flip in the framing metadata is caught too, not just in the data.
 pub fn checksum(offset: u64, timestamp: u64, value: &[u8]) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&offset.to_be_bytes());

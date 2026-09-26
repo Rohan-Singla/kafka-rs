@@ -1,11 +1,6 @@
 use std::fs::File;
 use std::io;
 
-// Positional reads and writes, so every file operation names the byte it acts
-// on instead of moving a shared cursor. This is what lets `Segment::read` take
-// `&self`: with no cursor to race on, any number of readers can pull from the
-// same open file at once while a writer appends to the end.
-
 #[cfg(unix)]
 pub fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     use std::os::unix::fs::FileExt;

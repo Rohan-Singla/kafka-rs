@@ -8,13 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
-/// Durable store for committed consumer group offsets.
-///
-/// Commits go to an append only journal of one JSON object per line, replayed
-/// on startup with last write wins. Real Kafka keeps the same state in a
-/// compacted internal topic; this is the same idea with a flat file, and it is
-/// what makes a consumer's position survive a broker restart rather than living
-/// only in memory.
 pub struct OffsetStore {
     path: PathBuf,
     journal: Mutex<File>,
@@ -41,8 +34,6 @@ impl OffsetStore {
     pub fn open(path: PathBuf, fsync: bool) -> Result<Self> {
         let offsets = Self::replay(&path)?;
 
-        // Rewrite the journal from the replayed state so it does not grow
-        // without bound across restarts.
         Self::compact(&path, &offsets)?;
 
         let journal = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -68,8 +59,6 @@ impl OffsetStore {
             if line.trim().is_empty() {
                 continue;
             }
-            // A crash can leave a half written final line. Skipping it is right:
-            // the worst case is one consumer re-reading a handful of messages.
             match serde_json::from_str::<Entry>(&line) {
                 Ok(entry) => {
                     offsets.insert(
@@ -108,7 +97,6 @@ impl OffsetStore {
         temp.sync_all()?;
         drop(temp);
 
-        // Rename is atomic, so the journal is never left partly rewritten.
         std::fs::rename(&temp_path, path)?;
         Ok(())
     }
@@ -141,7 +129,6 @@ impl OffsetStore {
         Ok(())
     }
 
-    /// The committed offset, or 0 for a group that has never committed here.
     pub fn fetch(&self, group: &str, topic: &str, partition: u32) -> u64 {
         self.offsets
             .get(&OffsetKey {
@@ -154,11 +141,7 @@ impl OffsetStore {
     }
 
     pub fn groups(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .offsets
-            .iter()
-            .map(|e| e.key().group.clone())
-            .collect();
+        let mut names: Vec<String> = self.offsets.iter().map(|e| e.key().group.clone()).collect();
         names.sort_unstable();
         names.dedup();
         names
@@ -236,7 +219,12 @@ mod tests {
         let after = std::fs::metadata(&path).unwrap().len();
 
         assert_eq!(store.fetch("g", "t", 0), 499);
-        assert!(after < before, "expected compaction, {} -> {}", before, after);
+        assert!(
+            after < before,
+            "expected compaction, {} -> {}",
+            before,
+            after
+        );
     }
 
     #[test]
@@ -248,9 +236,9 @@ mod tests {
             let store = OffsetStore::open(path.clone(), false).unwrap();
             store.commit("g", "t", 0, 11).unwrap();
         }
-        // Simulate a crash partway through writing the next commit.
         let mut file = OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(b"{\"g\":\"g\",\"t\":\"t\",\"p\":0,\"o\":9").unwrap();
+        file.write_all(b"{\"g\":\"g\",\"t\":\"t\",\"p\":0,\"o\":9")
+            .unwrap();
         drop(file);
 
         let store = OffsetStore::open(path, false).unwrap();

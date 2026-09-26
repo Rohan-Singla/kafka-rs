@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{unexpected, Connection};
+use super::{Connection, unexpected};
 use crate::broker::groups::{GroupDescription, GroupSummary, TopicPartition};
 use crate::error::{Error, Result};
 use crate::network::protocol::{CommittedOffset, Request, Response};
@@ -14,23 +14,6 @@ pub struct ConsumerRecord {
     pub value: String,
 }
 
-/// Reads messages from a topic, either directly from a partition or as part of
-/// a consumer group.
-///
-/// ```no_run
-/// # async fn demo() -> kafka_rust::Result<()> {
-/// use kafka_rust::client::Consumer;
-///
-/// let mut consumer = Consumer::connect("127.0.0.1:9092").await?;
-/// consumer.subscribe("analytics", &["orders"]).await?;
-///
-/// for record in consumer.poll(100).await? {
-///     println!("{} -> {}", record.offset, record.value);
-/// }
-/// consumer.commit().await?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct Consumer {
     connection: Connection,
     group: Option<String>,
@@ -38,8 +21,6 @@ pub struct Consumer {
     generation: u64,
     assignment: Vec<TopicPartition>,
     positions: HashMap<TopicPartition, u64>,
-    /// Where the next poll starts in the assignment list, so a partition with a
-    /// long backlog cannot starve the others.
     cursor: usize,
 }
 
@@ -56,7 +37,6 @@ impl Consumer {
         })
     }
 
-    /// Join a consumer group and take ownership of a share of the partitions.
     pub async fn subscribe(&mut self, group: &str, topics: &[&str]) -> Result<()> {
         let response = self
             .connection
@@ -83,11 +63,6 @@ impl Consumer {
         Ok(())
     }
 
-    /// Fetch the next batch from the assigned partitions.
-    ///
-    /// Every poll heartbeats first. That renews the lease this consumer holds on
-    /// its partitions and is where a rebalance is noticed, so a consumer that
-    /// stops polling is treated as gone and its work is handed to someone else.
     pub async fn poll(&mut self, max_count: usize) -> Result<Vec<ConsumerRecord>> {
         let (group, member_id) = self.group_identity()?;
 
@@ -123,7 +98,6 @@ impl Consumer {
             return Ok(Vec::new());
         }
 
-        // Try each assigned partition once, starting where the last poll left off.
         for step in 0..self.assignment.len() {
             let index = (self.cursor + step) % self.assignment.len();
             let target = self.assignment[index].clone();
@@ -144,10 +118,6 @@ impl Consumer {
         Ok(Vec::new())
     }
 
-    /// Commit the position of every partition this consumer has read from.
-    ///
-    /// The committed value is the next offset to read, not the last one read,
-    /// so a restart resumes without replaying the final message.
     pub async fn commit(&mut self) -> Result<()> {
         let (group, _) = self.group_identity()?;
 
@@ -170,8 +140,6 @@ impl Consumer {
         Ok(())
     }
 
-    /// Leave the group so the remaining members rebalance immediately rather
-    /// than waiting out the session timeout.
     pub async fn leave(&mut self) -> Result<()> {
         let (group, member_id) = self.group_identity()?;
         self.connection
@@ -185,8 +153,6 @@ impl Consumer {
         Ok(())
     }
 
-    /// Read straight from one partition, with no group and no assignment.
-    /// Useful for replaying a log from the beginning.
     pub async fn poll_partition(
         &mut self,
         topic: &str,
@@ -194,7 +160,8 @@ impl Consumer {
         offset: u64,
         max_count: usize,
     ) -> Result<Vec<ConsumerRecord>> {
-        self.fetch_partition(topic, partition, offset, max_count).await
+        self.fetch_partition(topic, partition, offset, max_count)
+            .await
     }
 
     pub async fn committed(&mut self, group: &str, topic: &str, partition: u32) -> Result<u64> {
@@ -275,14 +242,12 @@ impl Consumer {
             .collect())
     }
 
-    /// Take a new assignment, seeding each newly owned partition from the
-    /// group's committed offset so a rebalance does not replay from zero.
     async fn adopt_assignment(&mut self, partitions: Vec<TopicPartition>) -> Result<()> {
-        let group = self.group.clone().ok_or_else(|| {
-            Error::Protocol("consumer is not subscribed to a group".to_string())
-        })?;
+        let group = self
+            .group
+            .clone()
+            .ok_or_else(|| Error::Protocol("consumer is not subscribed to a group".to_string()))?;
 
-        // Drop positions for partitions that were taken away.
         self.positions.retain(|tp, _| partitions.contains(tp));
 
         for target in &partitions {

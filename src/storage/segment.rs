@@ -2,18 +2,11 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use super::fileio::{read_exact_at, write_all_at};
-use super::record::{self, Header, Record, HEADER_LEN, MAX_RECORD_SIZE};
+use super::record::{self, HEADER_LEN, Header, MAX_RECORD_SIZE, Record};
 use crate::error::{Error, Result};
 
-/// One index entry: the record's offset, then its byte position in the log.
 pub const INDEX_ENTRY_LEN: u64 = 16;
 
-/// A segment is a `.log` file paired with a `.idx` file.
-///
-/// The log is the source of truth. The index is a derived accelerator that maps
-/// an offset to a byte position, so a read is two positional reads rather than a
-/// scan. Because the index can be rebuilt from the log but never the other way
-/// around, recovery always replays the log and rewrites the index to match.
 pub struct Segment {
     pub base_offset: u64,
     log: File,
@@ -26,7 +19,6 @@ pub struct Segment {
 
 impl Segment {
     pub fn open(dir: &Path, base_offset: u64) -> Result<Self> {
-        // Zero padded so a directory listing sorts by offset.
         let log_path = dir.join(format!("{:020}.log", base_offset));
         let index_path = dir.join(format!("{:020}.idx", base_offset));
 
@@ -49,21 +41,12 @@ impl Segment {
     fn open_rw(path: &Path) -> Result<File> {
         Ok(OpenOptions::new()
             .create(true)
-            // Never truncate: reopening a segment must preserve the log, which
-            // is the whole point of recovery.
             .truncate(false)
             .read(true)
             .write(true)
             .open(path)?)
     }
 
-    /// Replay the log from the start, stopping at the first record that does not
-    /// check out, and rewrite the index from what survived.
-    ///
-    /// A crash mid-append leaves a torn record at the tail: a short header, a
-    /// payload that never landed, or an index entry with no matching log record.
-    /// Everything before the tear is still valid, so recovery truncates the log
-    /// to the last good boundary rather than refusing to open the segment.
     fn recover(&mut self) -> Result<()> {
         let file_len = self.log.metadata()?.len();
         let mut positions: Vec<u64> = Vec::new();
@@ -126,11 +109,6 @@ impl Segment {
         Ok(())
     }
 
-    /// Append one record and return the offset it was assigned.
-    ///
-    /// The log is written before the index. If the process dies between the two
-    /// writes the index is short by one entry, which recovery notices and fixes;
-    /// the reverse order would leave the index pointing into unwritten bytes.
     pub fn append(&mut self, value: &[u8]) -> Result<u64> {
         if value.len() as u32 > MAX_RECORD_SIZE {
             return Err(Error::Protocol(format!(
@@ -158,7 +136,6 @@ impl Segment {
         Ok(offset)
     }
 
-    /// Look up one record by offset. Takes `&self`, so readers do not contend.
     pub fn read(&self, offset: u64) -> Result<Record> {
         if offset < self.base_offset || offset >= self.next_offset {
             return Err(Error::OffsetOutOfRange {
@@ -167,8 +144,6 @@ impl Segment {
             });
         }
 
-        // The +8 skips the offset field in the index entry and lands on the
-        // byte position that follows it.
         let index_position = (offset - self.base_offset) * INDEX_ENTRY_LEN + 8;
         let mut position_buf = [0u8; 8];
         read_exact_at(&self.index, &mut position_buf, index_position)?;
@@ -205,16 +180,15 @@ impl Segment {
         if actual != header.crc {
             return Err(Error::Corrupt {
                 position,
-                detail: format!("checksum mismatch, stored {} computed {}", header.crc, actual),
+                detail: format!(
+                    "checksum mismatch, stored {} computed {}",
+                    header.crc, actual
+                ),
             });
         }
         Ok(())
     }
 
-    /// Read up to `max_count` records starting at `start_offset`.
-    ///
-    /// Records are laid out back to back, so after the first index lookup this
-    /// walks the log forward and skips the index entirely.
     pub fn read_from(&self, start_offset: u64, max_count: usize) -> Result<Vec<Record>> {
         if max_count == 0 || start_offset >= self.next_offset {
             return Ok(Vec::new());
@@ -238,7 +212,6 @@ impl Segment {
         Ok(records)
     }
 
-    /// Flush the OS page cache for this segment to the physical device.
     pub fn sync(&self) -> Result<()> {
         self.log.sync_data()?;
         self.index.sync_data()?;
@@ -327,15 +300,11 @@ mod tests {
         assert_eq!(batch[0].offset, 5);
         assert_eq!(batch[3].offset, 8);
 
-        // A request past the end is clamped, not an error.
         let tail = segment.read_from(18, 100).unwrap();
         assert_eq!(tail.len(), 2);
         assert!(segment.read_from(20, 10).unwrap().is_empty());
     }
 
-    /// This is the bug that made a restart corrupt the log: the old code reset
-    /// current_offset to base_offset on open, so a reopened segment re-issued
-    /// offsets that were already on disk.
     #[test]
     fn reopening_resumes_at_the_next_offset() {
         let dir = temp_dir();
@@ -363,7 +332,6 @@ mod tests {
             good_size = segment.size();
         }
 
-        // Simulate a crash partway through a third append.
         let log_path = dir.path().join(format!("{:020}.log", 0));
         let mut file = OpenOptions::new().append(true).open(&log_path).unwrap();
         file.write_all(&3u64.to_be_bytes()).unwrap();
@@ -388,14 +356,12 @@ mod tests {
             segment.append(b"unreachable").unwrap();
         }
 
-        // Flip a byte inside the second record's payload.
         let log_path = dir.path().join(format!("{:020}.log", 0));
         let mut bytes = fs::read(&log_path).unwrap();
         let second_payload_start = HEADER_LEN + b"keep me".len() + HEADER_LEN;
         bytes[second_payload_start] ^= 0xFF;
         fs::write(&log_path, &bytes).unwrap();
 
-        // Everything from the bad record onward is dropped, and offset 0 survives.
         let segment = Segment::open(dir.path(), 0).unwrap();
         assert_eq!(segment.next_offset(), 1);
         assert_eq!(segment.read(0).unwrap().value, b"keep me");
@@ -411,7 +377,6 @@ mod tests {
             }
         }
 
-        // Destroy the index entirely. The log alone must be enough.
         let index_path = dir.path().join(format!("{:020}.idx", 0));
         fs::write(&index_path, b"").unwrap();
 

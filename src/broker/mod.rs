@@ -13,20 +13,14 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::storage::partition::DEFAULT_SEGMENT_SIZE;
 use crate::storage::{Partition, Record};
-use groups::{Assignment, Coordinator, GroupDescription, GroupSummary, DEFAULT_SESSION_TIMEOUT};
+use groups::{Assignment, Coordinator, DEFAULT_SESSION_TIMEOUT, GroupDescription, GroupSummary};
 use offsets::OffsetStore;
 
-/// Consumer offsets live in a flat file rather than a topic, so the topic
-/// scanner (which only walks directories) skips it without a special case.
 const OFFSETS_FILE: &str = "__offsets.json";
 
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
     pub data_dir: PathBuf,
-    /// Fsync every write before acknowledging it. Off by default: a write is
-    /// already safe against a broker crash, since it has reached the OS. This
-    /// additionally makes it safe against the machine losing power, at a large
-    /// cost in throughput.
     pub fsync: bool,
     pub segment_size: u64,
     pub session_timeout: Duration,
@@ -81,10 +75,6 @@ impl Broker {
         Ok(broker)
     }
 
-    /// Rebuild the topic registry from what is on disk.
-    ///
-    /// Without this the registry starts empty on every boot and a restarted
-    /// broker reports "unknown topic" for data it is sitting on.
     fn load_topics_from_disk(&self) -> Result<()> {
         for entry in fs::read_dir(&self.config.data_dir)? {
             let path = entry?.path();
@@ -114,8 +104,6 @@ impl Broker {
             if numbered.is_empty() {
                 continue;
             }
-            // Partition ids index into a Vec, so a gap would silently shift every
-            // partition after it onto the wrong log.
             if numbered != (0..numbered.len() as u32).collect::<Vec<_>>() {
                 tracing::warn!(
                     "topic '{}' has non-contiguous partition directories {:?}, skipping",
@@ -134,7 +122,11 @@ impl Broker {
                 )?)));
             }
 
-            tracing::info!("loaded topic '{}' with {} partition(s)", name, partitions.len());
+            tracing::info!(
+                "loaded topic '{}' with {} partition(s)",
+                name,
+                partitions.len()
+            );
             self.topics.insert(name.to_string(), partitions);
         }
         Ok(())
@@ -153,7 +145,11 @@ impl Broker {
 
         let mut partitions = Vec::with_capacity(partition_count as usize);
         for id in 0..partition_count {
-            let dir = self.config.data_dir.join(name).join(format!("partition-{}", id));
+            let dir = self
+                .config
+                .data_dir
+                .join(name)
+                .join(format!("partition-{}", id));
             partitions.push(Arc::new(RwLock::new(Partition::with_segment_size(
                 dir,
                 self.config.segment_size,
@@ -161,7 +157,11 @@ impl Broker {
         }
 
         self.topics.insert(name.to_string(), partitions);
-        tracing::info!("created topic '{}' with {} partition(s)", name, partition_count);
+        tracing::info!(
+            "created topic '{}' with {} partition(s)",
+            name,
+            partition_count
+        );
         Ok(())
     }
 
@@ -172,7 +172,6 @@ impl Broker {
             .ok_or_else(|| Error::UnknownTopic(topic.to_string()))
     }
 
-    /// Snapshot of every topic's partition count, for the group coordinator.
     fn partition_counts(&self) -> HashMap<String, u32> {
         self.topics
             .iter()
@@ -194,11 +193,6 @@ impl Broker {
             })
     }
 
-    /// Append one message and return the offset it landed at.
-    ///
-    /// The file write runs on the blocking pool. Doing it inline would park a
-    /// Tokio worker thread on disk I/O, which stalls every other connection
-    /// that worker is driving.
     pub async fn produce(&self, topic: &str, partition: u32, value: Vec<u8>) -> Result<u64> {
         let handle = self.partition_handle(topic, partition)?;
         let fsync = self.config.fsync;
@@ -214,10 +208,6 @@ impl Broker {
         .await
     }
 
-    /// Read up to `max_count` records from `offset`.
-    ///
-    /// Takes a read lock, so any number of consumers can pull from the same
-    /// partition at once while a producer appends to it.
     pub async fn fetch(
         &self,
         topic: &str,
@@ -255,7 +245,8 @@ impl Broker {
                 return Err(Error::UnknownTopic(topic.clone()));
             }
         }
-        self.coordinator.join(group, topics, &self.partition_counts())
+        self.coordinator
+            .join(group, topics, &self.partition_counts())
     }
 
     pub fn heartbeat(&self, group: &str, member_id: &str) -> Result<Assignment> {
@@ -304,8 +295,6 @@ impl Broker {
         })
     }
 
-    /// Groups with live members, plus any group that only exists as committed
-    /// offsets because every member has disconnected.
     pub fn list_groups(&self) -> Vec<GroupSummary> {
         let mut summaries = self.coordinator.list();
         let live: Vec<String> = summaries.iter().map(|s| s.group.clone()).collect();
@@ -326,8 +315,6 @@ impl Broker {
     pub fn describe_group(&self, group: &str) -> Result<GroupDescription> {
         match self.coordinator.describe(group) {
             Ok(description) => Ok(description),
-            // A group with committed offsets but no live members is a real
-            // group that everyone has disconnected from, not an unknown one.
             Err(Error::UnknownGroup(_)) if !self.offsets.committed_for_group(group).is_empty() => {
                 Ok(GroupDescription {
                     group: group.to_string(),
@@ -348,8 +335,6 @@ impl Broker {
     }
 }
 
-/// Upper bound on records returned by one fetch, so a client cannot ask the
-/// broker to assemble an unbounded response.
 pub const MAX_FETCH_COUNT: usize = 10_000;
 
 async fn spawn_blocking<T, F>(f: F) -> Result<T>
@@ -362,8 +347,6 @@ where
         .map_err(|e| Error::Protocol(format!("storage task failed: {}", e)))?
 }
 
-/// Topic names become directory names, so anything that could escape the data
-/// directory or collide with the offsets file has to be rejected here.
 pub fn validate_topic_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 249 {
         return Err(Error::InvalidTopicName(name.to_string()));
@@ -406,7 +389,6 @@ mod tests {
         assert_eq!(records.len(), 10);
         assert_eq!(records[3].value, b"order 3");
 
-        // A different partition is a separate log with its own offsets.
         assert!(broker.fetch("orders", 1, 0, 100).await.unwrap().is_empty());
     }
 
@@ -426,15 +408,16 @@ mod tests {
         ));
     }
 
-    /// The registry used to start empty on every boot, so a restarted broker
-    /// could not serve topics whose data was right there on disk.
     #[tokio::test]
     async fn topics_and_data_survive_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         {
             let broker = test_broker(&dir);
             broker.create_topic("orders", 3).unwrap();
-            broker.produce("orders", 2, b"before restart".to_vec()).await.unwrap();
+            broker
+                .produce("orders", 2, b"before restart".to_vec())
+                .await
+                .unwrap();
         }
 
         let broker = test_broker(&dir);
@@ -444,9 +427,11 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].value, b"before restart");
 
-        // And the offset sequence picks up where it left off.
         assert_eq!(
-            broker.produce("orders", 2, b"after restart".to_vec()).await.unwrap(),
+            broker
+                .produce("orders", 2, b"after restart".to_vec())
+                .await
+                .unwrap(),
             1
         );
     }
@@ -473,7 +458,6 @@ mod tests {
         broker.create_topic("orders", 2).unwrap();
         broker.produce("orders", 0, b"kept".to_vec()).await.unwrap();
 
-        // Re-creating must not wipe data or change the partition count.
         broker.create_topic("orders", 8).unwrap();
         assert_eq!(broker.partition_count("orders").unwrap(), 2);
         assert_eq!(broker.fetch("orders", 0, 0, 10).await.unwrap().len(), 1);
@@ -523,10 +507,12 @@ mod tests {
         let broker = test_broker(&dir);
         broker.create_topic("orders", 1).unwrap();
         for i in 0..50 {
-            broker.produce("orders", 0, format!("m{}", i).into_bytes()).await.unwrap();
+            broker
+                .produce("orders", 0, format!("m{}", i).into_bytes())
+                .await
+                .unwrap();
         }
 
-        // usize::MAX must not turn into an unbounded allocation.
         let records = broker.fetch("orders", 0, 0, usize::MAX).await.unwrap();
         assert_eq!(records.len(), 50);
     }

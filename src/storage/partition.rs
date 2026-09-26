@@ -5,13 +5,8 @@ use super::record::Record;
 use super::segment::Segment;
 use crate::error::{Error, Result};
 
-/// Roll to a fresh segment once the active one passes this size.
 pub const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
 
-/// An ordered run of segments that together form one append only log.
-///
-/// Only the last segment is written to. The earlier ones are sealed and stay on
-/// disk so a consumer can still replay them.
 pub struct Partition {
     dir: PathBuf,
     segments: Vec<Segment>,
@@ -36,8 +31,6 @@ impl Partition {
             segments.push(Segment::open(&dir, base_offset)?);
         }
 
-        // A crash right after rolling can leave an empty trailing segment. Drop
-        // it so the active segment is always the one holding the highest offset.
         while segments.len() > 1 && segments.last().is_some_and(|s| s.is_empty()) {
             let dead = segments.pop().unwrap();
             let (log_path, index_path) = dead.paths();
@@ -86,8 +79,6 @@ impl Partition {
         self.segments[index].read(offset)
     }
 
-    /// Read up to `max_count` records from `start_offset`, following the log
-    /// across segment boundaries.
     pub fn read_from(&self, start_offset: u64, max_count: usize) -> Result<Vec<Record>> {
         let end = self.next_offset();
         if start_offset >= end || max_count == 0 {
@@ -137,7 +128,9 @@ impl Partition {
     }
 
     fn active(&self) -> &Segment {
-        self.segments.last().expect("a partition always has one segment")
+        self.segments
+            .last()
+            .expect("a partition always has one segment")
     }
 
     fn active_mut(&mut self) -> &mut Segment {
@@ -146,8 +139,6 @@ impl Partition {
             .expect("a partition always has one segment")
     }
 
-    /// The last segment whose base offset is at or below `offset`. Base offsets
-    /// are sorted, so this is a binary search.
     fn segment_for(&self, offset: u64) -> Result<usize> {
         match self
             .segments
@@ -192,11 +183,12 @@ mod tests {
     #[test]
     fn rolls_to_a_new_segment_past_the_size_limit() {
         let dir = temp_dir();
-        // Small enough that a handful of records forces several rolls.
         let mut partition = Partition::with_segment_size(dir.path().to_path_buf(), 128).unwrap();
 
         for i in 0..40 {
-            partition.append(format!("message number {}", i).as_bytes()).unwrap();
+            partition
+                .append(format!("message number {}", i).as_bytes())
+                .unwrap();
         }
 
         assert!(
@@ -212,7 +204,9 @@ mod tests {
         let dir = temp_dir();
         let mut partition = Partition::with_segment_size(dir.path().to_path_buf(), 128).unwrap();
         for i in 0..40 {
-            partition.append(format!("message number {}", i).as_bytes()).unwrap();
+            partition
+                .append(format!("message number {}", i).as_bytes())
+                .unwrap();
         }
         assert!(partition.segment_count() > 1);
 
@@ -222,7 +216,6 @@ mod tests {
             assert_eq!(record.offset, i as u64);
         }
 
-        // A window that starts inside one segment and ends inside another.
         let middle = partition.read_from(5, 20).unwrap();
         assert_eq!(middle.len(), 20);
         assert_eq!(middle[0].offset, 5);
@@ -234,7 +227,9 @@ mod tests {
         let dir = temp_dir();
         let mut partition = Partition::with_segment_size(dir.path().to_path_buf(), 128).unwrap();
         for i in 0..40 {
-            partition.append(format!("message number {}", i).as_bytes()).unwrap();
+            partition
+                .append(format!("message number {}", i).as_bytes())
+                .unwrap();
         }
 
         for i in 0..40u64 {
@@ -251,7 +246,9 @@ mod tests {
             let mut partition =
                 Partition::with_segment_size(dir.path().to_path_buf(), 128).unwrap();
             for i in 0..40 {
-                partition.append(format!("message number {}", i).as_bytes()).unwrap();
+                partition
+                    .append(format!("message number {}", i).as_bytes())
+                    .unwrap();
             }
         }
 

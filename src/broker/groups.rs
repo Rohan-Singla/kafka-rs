@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::storage::record::now_millis;
 
-/// How long a member may go without a heartbeat before the group gives its
-/// partitions to someone else.
 pub const DEFAULT_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -57,11 +55,6 @@ struct Group {
     assignments: HashMap<String, Vec<TopicPartition>>,
 }
 
-/// Tracks who is in each consumer group and which partitions they own.
-///
-/// Membership changes bump a generation counter. A consumer learns it has been
-/// rebalanced by seeing a generation it does not recognise come back from a
-/// heartbeat, at which point it adopts the new assignment.
 pub struct Coordinator {
     groups: Mutex<HashMap<String, Group>>,
     session_timeout: Duration,
@@ -77,7 +70,6 @@ impl Coordinator {
         }
     }
 
-    /// Add a member to a group and hand back its share of the partitions.
     pub fn join(
         &self,
         group_id: &str,
@@ -120,16 +112,16 @@ impl Coordinator {
         Self::rebalance(group, partition_counts);
 
         Ok(Assignment {
-            partitions: group.assignments.get(&member_id).cloned().unwrap_or_default(),
+            partitions: group
+                .assignments
+                .get(&member_id)
+                .cloned()
+                .unwrap_or_default(),
             member_id,
             generation: group.generation,
         })
     }
 
-    /// Refresh a member's lease and return its current assignment.
-    ///
-    /// An unknown member means it was evicted while it was away, so the caller
-    /// has to rejoin rather than keep using a stale assignment.
     pub fn heartbeat(
         &self,
         group_id: &str,
@@ -159,12 +151,14 @@ impl Coordinator {
         Ok(Assignment {
             member_id: member_id.to_string(),
             generation: group.generation,
-            partitions: group.assignments.get(member_id).cloned().unwrap_or_default(),
+            partitions: group
+                .assignments
+                .get(member_id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
-    /// Leave cleanly, so the group rebalances immediately instead of waiting
-    /// out the session timeout.
     pub fn leave(
         &self,
         group_id: &str,
@@ -252,11 +246,6 @@ impl Coordinator {
         Self::rebalance_with_known_counts(group, partition_counts);
     }
 
-    /// Round robin assignment, dealt per topic so a member only ever receives
-    /// partitions of topics it actually subscribed to.
-    ///
-    /// Members are sorted by id and partitions by number, so every broker thread
-    /// computing this for the same membership lands on the same answer.
     fn rebalance_with_known_counts(group: &mut Group, partition_counts: &HashMap<String, u32>) {
         let mut assignments: HashMap<String, Vec<TopicPartition>> = group
             .members
@@ -334,11 +323,16 @@ mod tests {
         let coordinator = Coordinator::default();
         let counts = counts(&[("orders", 6)]);
 
-        let a = coordinator.join("g", vec!["orders".to_string()], &counts).unwrap();
-        let b = coordinator.join("g", vec!["orders".to_string()], &counts).unwrap();
-        let c = coordinator.join("g", vec!["orders".to_string()], &counts).unwrap();
+        let a = coordinator
+            .join("g", vec!["orders".to_string()], &counts)
+            .unwrap();
+        let b = coordinator
+            .join("g", vec!["orders".to_string()], &counts)
+            .unwrap();
+        let c = coordinator
+            .join("g", vec!["orders".to_string()], &counts)
+            .unwrap();
 
-        // The first two joined before the others, so re-read their current view.
         let a = coordinator.heartbeat("g", &a.member_id, &counts).unwrap();
         let b = coordinator.heartbeat("g", &b.member_id, &counts).unwrap();
         let c = coordinator.heartbeat("g", &c.member_id, &counts).unwrap();
@@ -364,7 +358,11 @@ mod tests {
         let counts = counts(&[("orders", 2)]);
 
         let members: Vec<Assignment> = (0..4)
-            .map(|_| coordinator.join("g", vec!["orders".to_string()], &counts).unwrap())
+            .map(|_| {
+                coordinator
+                    .join("g", vec!["orders".to_string()], &counts)
+                    .unwrap()
+            })
             .collect();
 
         let held: Vec<usize> = members
@@ -387,10 +385,18 @@ mod tests {
         let coordinator = Coordinator::default();
         let counts = counts(&[("orders", 4)]);
 
-        let a = coordinator.join("g", vec!["orders".to_string()], &counts).unwrap();
-        let b = coordinator.join("g", vec!["orders".to_string()], &counts).unwrap();
+        let a = coordinator
+            .join("g", vec!["orders".to_string()], &counts)
+            .unwrap();
+        let b = coordinator
+            .join("g", vec!["orders".to_string()], &counts)
+            .unwrap();
         assert_eq!(
-            coordinator.heartbeat("g", &a.member_id, &counts).unwrap().partitions.len(),
+            coordinator
+                .heartbeat("g", &a.member_id, &counts)
+                .unwrap()
+                .partitions
+                .len(),
             2
         );
 
@@ -406,7 +412,9 @@ mod tests {
         let coordinator = Coordinator::default();
         let counts = counts(&[("orders", 2)]);
 
-        let a = coordinator.join("g", vec!["orders".to_string()], &counts).unwrap();
+        let a = coordinator
+            .join("g", vec!["orders".to_string()], &counts)
+            .unwrap();
         coordinator.leave("g", &a.member_id, &counts).unwrap();
 
         assert!(coordinator.list().is_empty());
@@ -421,11 +429,14 @@ mod tests {
         let coordinator = Coordinator::new(Duration::from_millis(0));
         let counts = counts(&[("orders", 4)]);
 
-        let stale = coordinator.join("g", vec!["orders".to_string()], &counts).unwrap();
+        let stale = coordinator
+            .join("g", vec!["orders".to_string()], &counts)
+            .unwrap();
         std::thread::sleep(Duration::from_millis(5));
 
-        // Joining sweeps expired members first, so the newcomer inherits everything.
-        let fresh = coordinator.join("g", vec!["orders".to_string()], &counts).unwrap();
+        let fresh = coordinator
+            .join("g", vec!["orders".to_string()], &counts)
+            .unwrap();
         assert_eq!(fresh.partitions.len(), 4);
 
         assert!(matches!(
@@ -439,13 +450,19 @@ mod tests {
         let coordinator = Coordinator::default();
         let counts = counts(&[("orders", 2), ("payments", 2)]);
 
-        let orders = coordinator.join("g", vec!["orders".to_string()], &counts).unwrap();
+        let orders = coordinator
+            .join("g", vec!["orders".to_string()], &counts)
+            .unwrap();
         let payments = coordinator
             .join("g", vec!["payments".to_string()], &counts)
             .unwrap();
 
-        let orders = coordinator.heartbeat("g", &orders.member_id, &counts).unwrap();
-        let payments = coordinator.heartbeat("g", &payments.member_id, &counts).unwrap();
+        let orders = coordinator
+            .heartbeat("g", &orders.member_id, &counts)
+            .unwrap();
+        let payments = coordinator
+            .heartbeat("g", &payments.member_id, &counts)
+            .unwrap();
 
         assert!(orders.partitions.iter().all(|tp| tp.topic == "orders"));
         assert!(payments.partitions.iter().all(|tp| tp.topic == "payments"));

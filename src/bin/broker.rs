@@ -69,7 +69,6 @@ async fn main() {
         broker.config().fsync
     );
 
-    // Ctrl-C returns from run() rather than killing the process mid-write.
     tokio::select! {
         result = server.run() => {
             if let Err(e) = result {

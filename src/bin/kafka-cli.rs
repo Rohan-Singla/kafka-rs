@@ -1,7 +1,7 @@
 use std::process;
 
-use kafka_rust::client::{Consumer, Producer};
 use kafka_rust::Result;
+use kafka_rust::client::{Consumer, Producer};
 
 const USAGE: &str = "\
 mini-kafka admin CLI
@@ -84,7 +84,10 @@ async fn run(args: Vec<String>) -> Result<()> {
                 println!("no topics");
                 return Ok(());
             }
-            println!("{:<24} {:>10} {:>12} {:>12}", "TOPIC", "PARTITIONS", "MESSAGES", "BYTES");
+            println!(
+                "{:<24} {:>10} {:>12} {:>12}",
+                "TOPIC", "PARTITIONS", "MESSAGES", "BYTES"
+            );
             for topic in topics {
                 let messages: u64 = topic
                     .partitions
@@ -139,7 +142,9 @@ async fn run(args: Vec<String>) -> Result<()> {
             let max = flag_u64(&flags, "max")?.unwrap_or(100) as usize;
 
             let mut consumer = Consumer::connect(&broker).await?;
-            let records = consumer.poll_partition(&topic, partition, from, max).await?;
+            let records = consumer
+                .poll_partition(&topic, partition, from, max)
+                .await?;
 
             if records.is_empty() {
                 println!("no messages at or after offset {}", from);
@@ -217,9 +222,9 @@ async fn run(args: Vec<String>) -> Result<()> {
 
 fn value_for(args: &[String], i: &mut usize, flag: &str) -> Result<String> {
     *i += 1;
-    args.get(*i).cloned().ok_or_else(|| {
-        kafka_rust::Error::Protocol(format!("{} needs a value", flag))
-    })
+    args.get(*i)
+        .cloned()
+        .ok_or_else(|| kafka_rust::Error::Protocol(format!("{} needs a value", flag)))
 }
 
 fn require(rest: &[String], index: usize, message: &str) -> Result<String> {

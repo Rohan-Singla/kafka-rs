@@ -1,11 +1,3 @@
-//! Reads the orders topic as a member of a consumer group.
-//!
-//! Start the broker and run the producer first, then:
-//!     cargo run --example consumer
-//!
-//! Run it twice. The second run resumes from the committed offset instead of
-//! replaying, because the commit is on disk rather than in the broker's memory.
-
 use kafka_rust::client::Consumer;
 
 #[tokio::main]
@@ -26,8 +18,6 @@ async fn main() -> kafka_rust::Result<()> {
         .collect();
     println!("assigned partitions: {}\n", owned.join(" "));
 
-    // poll() returns one partition's batch at a time and rotates between the
-    // assigned partitions, so keep polling until it comes back empty.
     let mut total = 0;
     loop {
         let records = consumer.poll(10).await?;
@@ -50,8 +40,6 @@ async fn main() -> kafka_rust::Result<()> {
         println!("\nread {} message(s) and committed", total);
     }
 
-    // Leaving lets the rest of the group rebalance now rather than after the
-    // session timeout.
     consumer.leave().await?;
     Ok(())
 }

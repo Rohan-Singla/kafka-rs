@@ -3,15 +3,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{Error, Result};
 
-/// Ceiling on one frame. The length prefix arrives before the body, so without
-/// this a client could send four bytes claiming 4GB and make the broker try to
-/// allocate it.
 pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
-/// Framing is `[length: u32 big endian][payload: length bytes]`.
-///
-/// TCP is a byte stream with no message boundaries, so the length prefix is what
-/// tells the reader where one request ends and the next begins.
 pub async fn read_frame<R>(reader: &mut R) -> Result<Option<BytesMut>>
 where
     R: AsyncRead + Unpin,
@@ -19,7 +12,6 @@ where
     let mut length_buf = [0u8; 4];
     match reader.read_exact(&mut length_buf).await {
         Ok(_) => {}
-        // Hitting EOF on the length prefix is a clean disconnect, not a failure.
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e.into()),
     }
@@ -37,8 +29,6 @@ where
     Ok(Some(payload))
 }
 
-/// Length prefix and payload go out in a single write, so a reader never sees a
-/// header without its body behind it.
 pub async fn write_frame<W>(writer: &mut W, payload: &[u8]) -> Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -95,7 +85,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_truncated_body_is_an_error() {
-        // Claims 100 bytes, delivers 3.
         let mut buffer = 100u32.to_be_bytes().to_vec();
         buffer.extend_from_slice(b"abc");
 
@@ -103,7 +92,6 @@ mod tests {
         assert!(read_frame(&mut cursor).await.is_err());
     }
 
-    /// A four byte header must not be able to trigger a huge allocation.
     #[tokio::test]
     async fn an_oversized_length_prefix_is_refused_before_allocating() {
         let buffer = u32::MAX.to_be_bytes().to_vec();

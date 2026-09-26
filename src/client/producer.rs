@@ -1,22 +1,10 @@
 use std::collections::HashMap;
 
-use super::{unexpected, Connection};
+use super::{Connection, unexpected};
 use crate::broker::TopicInfo;
 use crate::error::Result;
 use crate::network::protocol::{Request, Response};
 
-/// Writes messages to a topic.
-///
-/// ```no_run
-/// # async fn demo() -> kafka_rust::Result<()> {
-/// use kafka_rust::client::Producer;
-///
-/// let mut producer = Producer::connect("127.0.0.1:9092").await?;
-/// producer.create_topic("orders", 3).await?;
-/// producer.send("orders", "order #101").await?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct Producer {
     connection: Connection,
     partition_counts: HashMap<String, u32>,
@@ -39,17 +27,10 @@ impl Producer {
                 partitions,
             })
             .await?;
-        // The cached count is now stale, and the next send needs the real one.
         self.partition_counts.remove(name);
         Ok(())
     }
 
-    /// Send to the next partition in rotation.
-    ///
-    /// Spreading writes keeps every partition roughly the same size, which is
-    /// what lets a consumer group actually parallelise. Ordering is only ever
-    /// guaranteed within a single partition, so anything order sensitive should
-    /// use `send_to` and pin itself to one.
     pub async fn send(&mut self, topic: &str, message: &str) -> Result<u64> {
         let count = self.partition_count(topic).await?;
         let cursor = self.round_robin.entry(topic.to_string()).or_insert(0);

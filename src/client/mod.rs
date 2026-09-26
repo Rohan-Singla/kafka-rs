@@ -10,11 +10,6 @@ use crate::error::{Error, Result};
 use crate::network::codec;
 use crate::network::protocol::{Request, Response};
 
-/// One TCP connection to a broker, speaking the length prefixed JSON protocol.
-///
-/// The protocol is strictly request and response over a single socket, so a
-/// `Connection` is deliberately not shareable: two callers interleaving writes
-/// would each read back the other's reply.
 pub struct Connection {
     stream: TcpStream,
 }

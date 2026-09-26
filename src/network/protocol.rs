@@ -1,15 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::broker::groups::{GroupDescription, GroupSummary, TopicPartition};
 use crate::broker::TopicInfo;
+use crate::broker::groups::{GroupDescription, GroupSummary, TopicPartition};
 use crate::storage::Record;
 
-/// The wire protocol.
-///
-/// `#[serde(tag = "type")]` puts the variant name in a `type` field, so a frame
-/// is self describing JSON that any language can speak without a schema file.
-/// Payloads are UTF-8 text: the storage engine underneath is byte oriented, but
-/// the protocol is deliberately readable so it can be driven from netcat.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
