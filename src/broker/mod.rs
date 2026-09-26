@@ -55,21 +55,26 @@ pub struct TopicInfo {
 pub struct Broker {
     config: BrokerConfig,
     topics: DashMap<String, Vec<Arc<RwLock<Partition>>>>,
-    offsets: OffsetStore,
+    offsets: Arc<OffsetStore>,
     coordinator: Coordinator,
+    create_lock: tokio::sync::Mutex<()>,
 }
 
 impl Broker {
     pub fn open(config: BrokerConfig) -> Result<Self> {
         fs::create_dir_all(&config.data_dir)?;
 
-        let offsets = OffsetStore::open(config.data_dir.join(OFFSETS_FILE), config.fsync)?;
+        let offsets = Arc::new(OffsetStore::open(
+            config.data_dir.join(OFFSETS_FILE),
+            config.fsync,
+        )?);
         let coordinator = Coordinator::new(config.session_timeout);
         let broker = Self {
             topics: DashMap::new(),
             config,
             offsets,
             coordinator,
+            create_lock: tokio::sync::Mutex::new(()),
         };
         broker.load_topics_from_disk()?;
         Ok(broker)
@@ -132,29 +137,42 @@ impl Broker {
         Ok(())
     }
 
-    pub fn create_topic(&self, name: &str, partition_count: u32) -> Result<()> {
+    pub async fn create_topic(&self, name: &str, partition_count: u32) -> Result<()> {
         validate_topic_name(name)?;
         if partition_count == 0 {
             return Err(Error::Protocol(
                 "a topic needs at least one partition".to_string(),
             ));
         }
-        if self.topics.contains_key(name) {
+
+        let _creating = self.create_lock.lock().await;
+
+        if let Some(existing) = self.topics.get(name).map(|p| p.len() as u32) {
+            if existing != partition_count {
+                return Err(Error::Protocol(format!(
+                    "topic '{}' already exists with {} partition(s), not {}",
+                    name, existing, partition_count
+                )));
+            }
             return Ok(());
         }
 
-        let mut partitions = Vec::with_capacity(partition_count as usize);
-        for id in 0..partition_count {
-            let dir = self
-                .config
-                .data_dir
-                .join(name)
-                .join(format!("partition-{}", id));
-            partitions.push(Arc::new(RwLock::new(Partition::with_segment_size(
-                dir,
-                self.config.segment_size,
-            )?)));
-        }
+        let data_dir = self.config.data_dir.clone();
+        let segment_size = self.config.segment_size;
+        let topic = name.to_string();
+
+        let partitions = spawn_blocking(move || {
+            let mut partitions = Vec::with_capacity(partition_count as usize);
+            for id in 0..partition_count {
+                let dir = data_dir.join(&topic).join(format!("partition-{}", id));
+                partitions.push(Arc::new(RwLock::new(Partition::with_segment_size(
+                    dir,
+                    segment_size,
+                )?)));
+            }
+            Ok(partitions)
+        })
+        .await?;
 
         self.topics.insert(name.to_string(), partitions);
         tracing::info!(
@@ -220,19 +238,22 @@ impl Broker {
 
         spawn_blocking(move || {
             let guard = handle.read().unwrap_or_else(|e| e.into_inner());
-            guard.read_from(offset, max_count)
+            guard.read_from(offset, max_count, MAX_FETCH_BYTES)
         })
         .await
     }
 
-    pub fn commit_offset(
+    pub async fn commit_offset(
         &self,
         group: &str,
         topic: &str,
         partition: u32,
         offset: u64,
     ) -> Result<()> {
-        self.offsets.commit(group, topic, partition, offset)
+        let offsets = Arc::clone(&self.offsets);
+        let (group, topic) = (group.to_string(), topic.to_string());
+
+        spawn_blocking(move || offsets.commit(&group, &topic, partition, offset)).await
     }
 
     pub fn fetch_offset(&self, group: &str, topic: &str, partition: u32) -> u64 {
@@ -337,6 +358,8 @@ impl Broker {
 
 pub const MAX_FETCH_COUNT: usize = 10_000;
 
+pub const MAX_FETCH_BYTES: u64 = 4 * 1024 * 1024;
+
 async fn spawn_blocking<T, F>(f: F) -> Result<T>
 where
     F: FnOnce() -> Result<T> + Send + 'static,
@@ -375,7 +398,7 @@ mod tests {
     async fn produce_then_fetch_roundtrips() {
         let dir = tempfile::tempdir().unwrap();
         let broker = test_broker(&dir);
-        broker.create_topic("orders", 2).unwrap();
+        broker.create_topic("orders", 2).await.unwrap();
 
         for i in 0..10 {
             let offset = broker
@@ -396,7 +419,7 @@ mod tests {
     async fn unknown_topics_and_partitions_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let broker = test_broker(&dir);
-        broker.create_topic("orders", 1).unwrap();
+        broker.create_topic("orders", 1).await.unwrap();
 
         assert!(matches!(
             broker.produce("nope", 0, b"x".to_vec()).await,
@@ -413,7 +436,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let broker = test_broker(&dir);
-            broker.create_topic("orders", 3).unwrap();
+            broker.create_topic("orders", 3).await.unwrap();
             broker
                 .produce("orders", 2, b"before restart".to_vec())
                 .await
@@ -441,8 +464,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let broker = test_broker(&dir);
-            broker.create_topic("orders", 1).unwrap();
-            broker.commit_offset("analytics", "orders", 0, 17).unwrap();
+            broker.create_topic("orders", 1).await.unwrap();
+            broker
+                .commit_offset("analytics", "orders", 0, 17)
+                .await
+                .unwrap();
         }
 
         let broker = test_broker(&dir);
@@ -451,16 +477,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creating_an_existing_topic_is_a_no_op() {
+    async fn recreating_a_topic_with_the_same_count_is_a_no_op() {
         let dir = tempfile::tempdir().unwrap();
         let broker = test_broker(&dir);
 
-        broker.create_topic("orders", 2).unwrap();
+        broker.create_topic("orders", 2).await.unwrap();
         broker.produce("orders", 0, b"kept".to_vec()).await.unwrap();
 
-        broker.create_topic("orders", 8).unwrap();
+        broker.create_topic("orders", 2).await.unwrap();
         assert_eq!(broker.partition_count("orders").unwrap(), 2);
         assert_eq!(broker.fetch("orders", 0, 0, 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn recreating_a_topic_with_a_different_count_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = test_broker(&dir);
+        broker.create_topic("orders", 2).await.unwrap();
+
+        let refused = broker.create_topic("orders", 8).await;
+        assert!(matches!(refused, Err(Error::Protocol(_))));
+        assert_eq!(broker.partition_count("orders").unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_fetch_is_bounded_by_bytes_not_just_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = test_broker(&dir);
+        broker.create_topic("big", 1).await.unwrap();
+
+        let payload = vec![b'x'; 512 * 1024];
+        for _ in 0..40 {
+            broker.produce("big", 0, payload.clone()).await.unwrap();
+        }
+
+        let records = broker.fetch("big", 0, 0, MAX_FETCH_COUNT).await.unwrap();
+        let bytes: u64 = records.iter().map(|r| r.size_on_disk()).sum();
+
+        assert!(!records.is_empty());
+        assert!(records.len() < 40, "expected a byte bounded batch");
+        assert!(bytes <= MAX_FETCH_BYTES, "returned {} bytes", bytes);
     }
 
     #[test]
@@ -480,7 +536,7 @@ mod tests {
     async fn describe_reports_real_partition_state() {
         let dir = tempfile::tempdir().unwrap();
         let broker = test_broker(&dir);
-        broker.create_topic("orders", 2).unwrap();
+        broker.create_topic("orders", 2).await.unwrap();
         broker.produce("orders", 0, b"one".to_vec()).await.unwrap();
         broker.produce("orders", 0, b"two".to_vec()).await.unwrap();
 
@@ -505,7 +561,7 @@ mod tests {
     async fn fetch_count_is_clamped() {
         let dir = tempfile::tempdir().unwrap();
         let broker = test_broker(&dir);
-        broker.create_topic("orders", 1).unwrap();
+        broker.create_topic("orders", 1).await.unwrap();
         for i in 0..50 {
             broker
                 .produce("orders", 0, format!("m{}", i).into_bytes())

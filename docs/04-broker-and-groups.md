@@ -1,0 +1,206 @@
+# 4. The broker and consumer groups
+
+Files: `src/broker/`.
+
+## The topic registry
+
+```rust
+pub struct Broker {
+    config: BrokerConfig,
+    topics: DashMap<String, Vec<Arc<RwLock<Partition>>>>,
+    offsets: OffsetStore,
+    coordinator: Coordinator,
+}
+```
+
+`DashMap` is a concurrent hash map: it shards internally so two threads touching
+different topics never contend. A plain `HashMap` behind one lock would make the
+registry itself a bottleneck even when the partitions being written are
+unrelated.
+
+Each partition then has its own `RwLock`, so locking is per partition rather
+than global.
+
+### Rebuilding it on startup
+
+`load_topics_from_disk` walks the data directory and rebuilds the registry from
+whatever folders are there. Without this step the registry starts empty and a
+restarted broker says "unknown topic" for data it is literally sitting on.
+
+It skips two things:
+
+- Directories whose name is not a valid topic name.
+- Topics with non-contiguous partition folders. Partition ids index into a
+  `Vec`, so a missing `partition-1` would silently shift `partition-2` into slot
+  1 and hand readers the wrong log. Refusing to load is the safe answer.
+
+### Topic names are validated
+
+```rust
+pub fn validate_topic_name(name: &str) -> Result<()>
+```
+
+Allows letters, digits, `.`, `_`, `-` and nothing else. This is a security
+check, not tidiness: the name becomes a directory name, so `../../etc/passwd`
+would otherwise write outside the data directory.
+
+## Durable consumer offsets
+
+`src/broker/offsets.rs`. Every commit appends one JSON line:
+
+```
+{"g":"order-processors","t":"orders","p":0,"o":6}
+{"g":"order-processors","t":"orders","p":1,"o":3}
+```
+
+On startup the file is replayed with **last write wins**, then rewritten from
+the resulting state. That rewrite is compaction: without it the file grows
+forever, since a consumer committing once a second writes 86,400 lines a day
+while only the final one matters.
+
+The rewrite goes to a temp file and then `rename`, which is atomic on POSIX. A
+crash mid compaction leaves either the old complete file or the new complete
+file, never a half written one.
+
+A torn final line (a crash mid commit) is logged and skipped rather than treated
+as fatal. The cost of skipping is one consumer replaying a few messages. The
+cost of bailing out would be every group losing its position.
+
+This is the same idea as Kafka's compacted `__consumer_offsets` topic, done with
+a flat file.
+
+## Consumer groups
+
+`src/broker/groups.rs`.
+
+### State
+
+```rust
+struct Group {
+    generation: u64,
+    members: HashMap<String, Member>,
+    assignments: HashMap<String, Vec<TopicPartition>>,
+}
+```
+
+The **generation** is a counter bumped on every membership change. It is how a
+consumer discovers it has been rebalanced: it heartbeats, gets back a generation
+it does not recognise, and adopts the new assignment.
+
+### The assignment algorithm
+
+Round robin, dealt per topic:
+
+```
+for each topic anyone subscribed to:
+    eligible = members subscribed to THIS topic, sorted by id
+    for partition in 0..partition_count:
+        owner = eligible[partition % eligible.len()]
+        give partition to owner
+```
+
+Two properties matter:
+
+- **Per topic.** A member only ever receives partitions of topics it actually
+  subscribed to. Dealing globally would hand a member a topic it never asked
+  for.
+- **Sorted.** Members sorted by id and partitions in numeric order makes the
+  result deterministic, so the same membership always produces the same
+  assignment.
+
+Worked example, 6 partitions and 3 members:
+
+```
+partition 0 -> member A     partition 3 -> member A
+partition 1 -> member B     partition 4 -> member B
+partition 2 -> member C     partition 5 -> member C
+```
+
+With 2 partitions and 4 members, two members get one partition each and two get
+nothing. That is not a bug: a partition can only be owned by one member of a
+group, so partition count is the parallelism ceiling.
+
+### Eviction
+
+A member that stops heartbeating is dropped after the session timeout (30s by
+default) and its partitions are redistributed.
+
+Eviction is **lazy**: it happens at the start of each `join` and `heartbeat`
+rather than on a timer. There is no background thread, and nothing is missed,
+because the surviving members are heartbeating and each of those calls triggers
+the sweep. A group with no live members has nobody to notice, and also nobody
+who cares.
+
+`leave` is the polite path. It removes the member immediately and rebalances, so
+the group recovers straight away instead of waiting out the timeout.
+
+## The concurrency model
+
+Three decisions, in order of importance.
+
+### 1. Reads share, writes exclude
+
+```rust
+Arc<RwLock<Partition>>
+```
+
+Many readers or one writer. `Partition::read_from` takes `&self`, so consumers
+genuinely read in parallel with each other while a producer appends.
+
+This only works because of positional I/O in the storage layer. See
+[06-rust-notes.md](06-rust-notes.md) for why that is the load bearing detail.
+
+### 2. Disk I/O runs on the blocking pool
+
+```rust
+spawn_blocking(move || {
+    let mut guard = handle.write().unwrap_or_else(|e| e.into_inner());
+    guard.append(&value)
+}).await
+```
+
+Tokio runs many connections on a few worker threads. A blocking file write on a
+worker thread parks *every other connection that worker was driving*, not just
+this one. `spawn_blocking` moves it to a separate pool built for exactly this.
+
+`unwrap_or_else(|e| e.into_inner())` recovers from lock poisoning. If a thread
+panicked while holding the lock, Rust marks it poisoned and normally every later
+`lock()` fails forever. Here the partition's state is only updated after a
+successful write, so recovering is safe and beats bricking the partition.
+
+### 3. Fetch counts are clamped
+
+```rust
+let max_count = max_count.clamp(1, MAX_FETCH_COUNT);   // 10,000
+```
+
+Otherwise a client asking for `usize::MAX` records makes the broker try to build
+an unbounded response.
+
+## fsync, and the 366x
+
+Off by default. The measured difference:
+
+| Mode | msgs/sec | p99 |
+|---|---|---|
+| Default | 67,738 | 112µs |
+| `--fsync` | 185 | 34,879µs |
+
+Understanding why needs two separate ideas that get conflated:
+
+- **A normal write reaches the kernel's page cache.** If the *broker process*
+  dies, the data is fine. The OS still has it and will write it out. `kill -9`
+  is survivable.
+- **It has not reached the physical disk yet.** If the *machine* loses power,
+  it is gone. Only `fsync` forces it to the platter.
+
+So the default is safe against a crash and unsafe against a power cut, and
+closing that gap costs three orders of magnitude.
+
+Kafka makes the same choice and defaults the same way, because it has
+replication: a write living in the page cache of three machines is safe against
+any one of them losing power. This project is single node, so it does not have
+that fallback. That is the honest caveat, and it is why "no replication" is
+listed as the biggest gap in the README.
+
+Next: [05-code-tour.md](05-code-tour.md).

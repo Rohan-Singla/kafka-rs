@@ -109,13 +109,11 @@ impl OffsetStore {
             o: offset,
         })?;
 
-        {
-            let mut journal = self.journal.lock().unwrap_or_else(|e| e.into_inner());
-            journal.write_all(line.as_bytes())?;
-            journal.write_all(b"\n")?;
-            if self.fsync {
-                journal.sync_data()?;
-            }
+        let mut journal = self.journal.lock().unwrap_or_else(|e| e.into_inner());
+        journal.write_all(line.as_bytes())?;
+        journal.write_all(b"\n")?;
+        if self.fsync {
+            journal.sync_data()?;
         }
 
         self.offsets.insert(
@@ -126,6 +124,7 @@ impl OffsetStore {
             },
             offset,
         );
+        drop(journal);
         Ok(())
     }
 

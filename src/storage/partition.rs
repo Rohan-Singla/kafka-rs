@@ -79,7 +79,12 @@ impl Partition {
         self.segments[index].read(offset)
     }
 
-    pub fn read_from(&self, start_offset: u64, max_count: usize) -> Result<Vec<Record>> {
+    pub fn read_from(
+        &self,
+        start_offset: u64,
+        max_count: usize,
+        max_bytes: u64,
+    ) -> Result<Vec<Record>> {
         let end = self.next_offset();
         if start_offset >= end || max_count == 0 {
             return Ok(Vec::new());
@@ -93,15 +98,40 @@ impl Partition {
 
         let mut records = Vec::new();
         let mut offset = start_offset;
+        let mut bytes = 0u64;
 
-        while records.len() < max_count && offset < end {
+        while records.len() < max_count && offset < end && bytes < max_bytes {
             let index = self.segment_for(offset)?;
-            let batch = self.segments[index].read_from(offset, max_count - records.len())?;
-            if batch.is_empty() {
+            let budget = max_bytes - bytes;
+            let batch =
+                self.segments[index].read_from(offset, max_count - records.len(), budget)?;
+
+            if !batch.is_empty() {
+                bytes += batch.iter().map(|r| r.size_on_disk()).sum::<u64>();
+                offset = batch[batch.len() - 1].offset + 1;
+                records.extend(batch);
+                continue;
+            }
+
+            if offset < self.segments[index].next_offset() {
+                if records.is_empty() {
+                    records = self.segments[index].read_from(offset, 1, u64::MAX)?;
+                }
                 break;
             }
-            offset = batch[batch.len() - 1].offset + 1;
-            records.extend(batch);
+
+            match self.segments.iter().find(|s| s.base_offset > offset) {
+                Some(next) => {
+                    tracing::warn!(
+                        "partition {} has no record at offset {}, resuming at {}",
+                        self.dir.display(),
+                        offset,
+                        next.base_offset
+                    );
+                    offset = next.base_offset;
+                }
+                None => break,
+            }
         }
 
         Ok(records)
@@ -172,7 +202,7 @@ mod tests {
         }
         assert_eq!(partition.next_offset(), 100);
 
-        let records = partition.read_from(0, 1000).unwrap();
+        let records = partition.read_from(0, 1000, u64::MAX).unwrap();
         assert_eq!(records.len(), 100);
         for (i, record) in records.iter().enumerate() {
             assert_eq!(record.offset, i as u64);
@@ -210,13 +240,13 @@ mod tests {
         }
         assert!(partition.segment_count() > 1);
 
-        let all = partition.read_from(0, 40).unwrap();
+        let all = partition.read_from(0, 40, u64::MAX).unwrap();
         assert_eq!(all.len(), 40);
         for (i, record) in all.iter().enumerate() {
             assert_eq!(record.offset, i as u64);
         }
 
-        let middle = partition.read_from(5, 20).unwrap();
+        let middle = partition.read_from(5, 20, u64::MAX).unwrap();
         assert_eq!(middle.len(), 20);
         assert_eq!(middle[0].offset, 5);
         assert_eq!(middle[19].offset, 24);
@@ -265,8 +295,8 @@ mod tests {
         let mut partition = Partition::open(dir.path().to_path_buf()).unwrap();
         partition.append(b"one").unwrap();
 
-        assert!(partition.read_from(1, 10).unwrap().is_empty());
-        assert!(partition.read_from(99, 10).unwrap().is_empty());
+        assert!(partition.read_from(1, 10, u64::MAX).unwrap().is_empty());
+        assert!(partition.read_from(99, 10, u64::MAX).unwrap().is_empty());
         assert!(matches!(
             partition.read(1),
             Err(Error::OffsetOutOfRange { .. })
@@ -280,6 +310,60 @@ mod tests {
         assert_eq!(partition.next_offset(), 0);
         assert_eq!(partition.start_offset(), 0);
         assert_eq!(partition.size(), 0);
-        assert!(partition.read_from(0, 10).unwrap().is_empty());
+        assert!(partition.read_from(0, 10, u64::MAX).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_hole_in_a_sealed_segment_does_not_hide_later_records() {
+        let dir = temp_dir();
+        {
+            let mut partition =
+                Partition::with_segment_size(dir.path().to_path_buf(), 128).unwrap();
+            for i in 0..40 {
+                partition
+                    .append(format!("message number {}", i).as_bytes())
+                    .unwrap();
+            }
+            assert!(partition.segment_count() > 2);
+        }
+
+        let first_log = dir.path().join(format!("{:020}.log", 0));
+        let mut bytes = std::fs::read(&first_log).unwrap();
+        let second_payload = 24 + "message number 0".len() + 24;
+        bytes[second_payload] ^= 0xFF;
+        std::fs::write(&first_log, &bytes).unwrap();
+
+        let partition = Partition::with_segment_size(dir.path().to_path_buf(), 128).unwrap();
+        let records = partition.read_from(0, 100, u64::MAX).unwrap();
+
+        assert!(
+            records.len() > 1,
+            "the streaming read stopped at the hole and returned {} record(s)",
+            records.len()
+        );
+        assert!(
+            records.iter().any(|r| r.offset >= 30),
+            "records after the hole are unreachable"
+        );
+    }
+
+    #[test]
+    fn read_from_respects_a_byte_budget() {
+        let dir = temp_dir();
+        let mut partition = Partition::open(dir.path().to_path_buf()).unwrap();
+        for _ in 0..20 {
+            partition.append(&[b'x'; 100]).unwrap();
+        }
+
+        let records = partition.read_from(0, 100, 500).unwrap();
+        assert!(!records.is_empty());
+        assert!(records.len() < 20, "byte budget was ignored");
+
+        let single = partition.read_from(0, 100, 1).unwrap();
+        assert_eq!(
+            single.len(),
+            1,
+            "a budget below one record must still return one"
+        );
     }
 }

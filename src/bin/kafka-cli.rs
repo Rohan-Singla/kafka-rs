@@ -21,6 +21,7 @@ COMMANDS:
 
 OPTIONS:
     --broker <ADDR>   Broker address  [default: 127.0.0.1:9092]
+    --                Treat everything after this as positional
     -h, --help        Print this help
 ";
 
@@ -42,9 +43,15 @@ async fn run(args: Vec<String>) -> Result<()> {
     let mut flags: Vec<(String, String)> = Vec::new();
     let mut i = 0;
 
+    let mut only_positional = false;
+
     while i < args.len() {
         let arg = &args[i];
-        if arg == "-h" || arg == "--help" {
+        if only_positional {
+            positional.push(arg.clone());
+        } else if arg == "--" {
+            only_positional = true;
+        } else if arg == "-h" || arg == "--help" {
             print!("{}", USAGE);
             return Ok(());
         } else if arg == "--broker" {

@@ -59,20 +59,29 @@ async fn run(config: Config) -> Result<()> {
     let per_producer = config.messages / config.producers;
     let total = per_producer * config.producers;
 
+    let topic = format!("{}-p{}", config.topic, config.producers);
+
     println!("mini-kafka benchmark");
     println!("  broker      {}", config.broker);
-    println!("  topic       {}", config.topic);
+    println!("  topic       {}", topic);
     println!("  messages    {}", total);
     println!("  producers   {} (one partition each)", config.producers);
     println!("  payload     {} bytes", config.size);
     println!();
 
-    let topic = config.topic.clone();
     let mut setup = Producer::connect(&config.broker).await?;
     setup.create_topic(&topic, partitions).await?;
-    let existing = setup
-        .describe_topic(&topic)
-        .await?
+
+    let described = setup.describe_topic(&topic).await?;
+    if described.partitions.len() as u32 != partitions {
+        return Err(kafka_rust::Error::Protocol(format!(
+            "topic '{}' has {} partition(s) but this run needs {}. Use --topic with a fresh name.",
+            topic,
+            described.partitions.len(),
+            partitions
+        )));
+    }
+    let existing = described
         .partitions
         .iter()
         .map(|p| p.next_offset)

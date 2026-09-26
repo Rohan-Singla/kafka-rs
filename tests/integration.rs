@@ -323,10 +323,13 @@ async fn errors_come_back_without_killing_the_connection() {
 
     let mut producer = Producer::connect(&broker.addr).await.unwrap();
 
-    assert!(matches!(
-        producer.send_to("ghost", 0, "x").await,
-        Err(Error::Protocol(_))
-    ));
+    let rejected = producer.send_to("ghost", 0, "x").await;
+    assert!(matches!(rejected, Err(Error::Broker(_))));
+    assert_eq!(
+        rejected.unwrap_err().to_string(),
+        "unknown topic 'ghost'",
+        "a broker error must not be re-prefixed by the client"
+    );
 
     assert!(producer.create_topic("../../etc/passwd", 1).await.is_err());
 
@@ -422,6 +425,61 @@ async fn group_admin_views_reflect_reality() {
     assert_eq!(description.members.len(), 1);
     assert_eq!(description.members[0].partitions.len(), 2);
     assert!(!committed.is_empty());
+
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn a_huge_fetch_is_capped_instead_of_dropping_the_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = RunningBroker::start(dir.path().to_path_buf()).await;
+
+    let mut producer = Producer::connect(&broker.addr).await.unwrap();
+    producer.create_topic("big", 1).await.unwrap();
+
+    let payload = "x".repeat(1024 * 1024);
+    for _ in 0..20 {
+        producer.send_to("big", 0, &payload).await.unwrap();
+    }
+
+    let mut consumer = Consumer::connect(&broker.addr).await.unwrap();
+    let first = consumer.poll_partition("big", 0, 0, 20).await.unwrap();
+
+    assert!(!first.is_empty(), "a fetch must never stall");
+    assert!(
+        first.len() < 20,
+        "20MB of messages came back in one frame, got {} records",
+        first.len()
+    );
+
+    let next = consumer
+        .poll_partition("big", 0, first.len() as u64, 20)
+        .await
+        .unwrap();
+    assert!(!next.is_empty(), "the connection survived and kept serving");
+}
+
+#[tokio::test]
+async fn recreating_a_topic_with_a_different_partition_count_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = RunningBroker::start(dir.path().to_path_buf()).await;
+
+    let mut producer = Producer::connect(&broker.addr).await.unwrap();
+    producer.create_topic("orders", 2).await.unwrap();
+
+    assert!(
+        producer.create_topic("orders", 8).await.is_err(),
+        "a silent no-op here makes callers produce to partitions that do not exist"
+    );
+    assert_eq!(
+        producer
+            .describe_topic("orders")
+            .await
+            .unwrap()
+            .partitions
+            .len(),
+        2
+    );
 
     broker.stop().await;
 }

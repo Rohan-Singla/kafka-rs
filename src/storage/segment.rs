@@ -110,7 +110,7 @@ impl Segment {
     }
 
     pub fn append(&mut self, value: &[u8]) -> Result<u64> {
-        if value.len() as u32 > MAX_RECORD_SIZE {
+        if value.len() as u64 > MAX_RECORD_SIZE as u64 {
             return Err(Error::Protocol(format!(
                 "message of {} bytes exceeds the {} byte record limit",
                 value.len(),
@@ -189,7 +189,12 @@ impl Segment {
         Ok(())
     }
 
-    pub fn read_from(&self, start_offset: u64, max_count: usize) -> Result<Vec<Record>> {
+    pub fn read_from(
+        &self,
+        start_offset: u64,
+        max_count: usize,
+        max_bytes: u64,
+    ) -> Result<Vec<Record>> {
         if max_count == 0 || start_offset >= self.next_offset {
             return Ok(Vec::new());
         }
@@ -203,10 +208,16 @@ impl Segment {
         let available = (self.next_offset - start_offset) as usize;
         let wanted = max_count.min(available);
         let mut records = Vec::with_capacity(wanted);
+        let mut bytes = 0u64;
 
         for _ in 0..wanted {
             let record = self.read_at_position(position)?;
-            position += record.size_on_disk();
+            let size = record.size_on_disk();
+            if bytes + size > max_bytes {
+                break;
+            }
+            bytes += size;
+            position += size;
             records.push(record);
         }
         Ok(records)
@@ -295,14 +306,14 @@ mod tests {
             segment.append(format!("m{}", i).as_bytes()).unwrap();
         }
 
-        let batch = segment.read_from(5, 4).unwrap();
+        let batch = segment.read_from(5, 4, u64::MAX).unwrap();
         assert_eq!(batch.len(), 4);
         assert_eq!(batch[0].offset, 5);
         assert_eq!(batch[3].offset, 8);
 
-        let tail = segment.read_from(18, 100).unwrap();
+        let tail = segment.read_from(18, 100, u64::MAX).unwrap();
         assert_eq!(tail.len(), 2);
-        assert!(segment.read_from(20, 10).unwrap().is_empty());
+        assert!(segment.read_from(20, 10, u64::MAX).unwrap().is_empty());
     }
 
     #[test]

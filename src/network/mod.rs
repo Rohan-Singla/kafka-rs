@@ -12,6 +12,8 @@ use protocol::{CommittedOffset, Message, Request, Response};
 
 pub use codec::MAX_FRAME_SIZE;
 
+const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub struct Server {
     listener: TcpListener,
     broker: Arc<Broker>,
@@ -35,6 +37,7 @@ impl Server {
                 Ok(pair) => pair,
                 Err(e) => {
                     tracing::warn!("accept failed: {}", e);
+                    tokio::time::sleep(ACCEPT_BACKOFF).await;
                     continue;
                 }
             };
@@ -73,16 +76,30 @@ async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> Result
             },
         };
 
-        codec::write_frame(&mut socket, &serde_json::to_vec(&response)?).await?;
+        let mut payload = serde_json::to_vec(&response)?;
+        if payload.len() > MAX_FRAME_SIZE {
+            let refusal = Response::Error {
+                reason: format!(
+                    "response of {} bytes exceeds the {} byte frame limit, request a smaller batch",
+                    payload.len(),
+                    MAX_FRAME_SIZE
+                ),
+            };
+            payload = serde_json::to_vec(&refusal)?;
+        }
+
+        codec::write_frame(&mut socket, &payload).await?;
     }
 }
 
 pub async fn dispatch(request: Request, broker: &Broker) -> Response {
     match request {
-        Request::CreateTopic { name, partitions } => match broker.create_topic(&name, partitions) {
-            Ok(()) => Response::Ok,
-            Err(e) => e.into(),
-        },
+        Request::CreateTopic { name, partitions } => {
+            match broker.create_topic(&name, partitions).await {
+                Ok(()) => Response::Ok,
+                Err(e) => e.into(),
+            }
+        }
 
         Request::Produce {
             topic,
@@ -113,7 +130,10 @@ pub async fn dispatch(request: Request, broker: &Broker) -> Response {
             topic,
             partition,
             offset,
-        } => match broker.commit_offset(&group, &topic, partition, offset) {
+        } => match broker
+            .commit_offset(&group, &topic, partition, offset)
+            .await
+        {
             Ok(()) => Response::Ok,
             Err(e) => e.into(),
         },

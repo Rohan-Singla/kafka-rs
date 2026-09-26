@@ -30,7 +30,7 @@ impl Connection {
             .ok_or(Error::Disconnected)?;
 
         match serde_json::from_slice::<Response>(&frame)? {
-            Response::Error { reason } => Err(Error::Protocol(reason)),
+            Response::Error { reason } => Err(Error::Broker(reason)),
             other => Ok(other),
         }
     }

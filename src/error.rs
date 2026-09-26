@@ -16,6 +16,7 @@ pub enum Error {
     OffsetOutOfRange { offset: u64, next_offset: u64 },
     InvalidTopicName(String),
     Protocol(String),
+    Broker(String),
     Disconnected,
 }
 
@@ -53,6 +54,7 @@ impl fmt::Display for Error {
             ),
             Error::InvalidTopicName(n) => write!(f, "invalid topic name '{}'", n),
             Error::Protocol(m) => write!(f, "protocol error: {}", m),
+            Error::Broker(m) => write!(f, "{}", m),
             Error::Disconnected => write!(f, "peer closed the connection"),
         }
     }
