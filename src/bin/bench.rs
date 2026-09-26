@@ -15,7 +15,7 @@ USAGE:
 
 OPTIONS:
     --broker <ADDR>     Broker address              [default: 127.0.0.1:9092]
-    --topic <NAME>      Topic to use                [default: bench]
+    --topic <NAME>      Topic prefix, run uses <NAME>-p<producers>  [default: bench]
     --messages <N>      Total messages to produce   [default: 100000]
     --producers <N>     Concurrent producers        [default: 4]
     --size <BYTES>      Payload size per message    [default: 128]
@@ -70,18 +70,17 @@ async fn run(config: Config) -> Result<()> {
     println!();
 
     let mut setup = Producer::connect(&config.broker).await?;
-    setup.create_topic(&topic, partitions).await?;
-
-    let described = setup.describe_topic(&topic).await?;
-    if described.partitions.len() as u32 != partitions {
+    if let Err(e) = setup.create_topic(&topic, partitions).await {
         return Err(kafka_rust::Error::Protocol(format!(
-            "topic '{}' has {} partition(s) but this run needs {}. Use --topic with a fresh name.",
-            topic,
-            described.partitions.len(),
-            partitions
+            "could not prepare topic '{}' with {} partition(s): {}. \
+             Use --topic with a fresh name, or clear the data directory.",
+            topic, partitions, e
         )));
     }
-    let existing = described
+
+    let existing = setup
+        .describe_topic(&topic)
+        .await?
         .partitions
         .iter()
         .map(|p| p.next_offset)

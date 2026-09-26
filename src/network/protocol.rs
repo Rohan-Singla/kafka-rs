@@ -102,6 +102,23 @@ pub struct CommittedOffset {
     pub offset: u64,
 }
 
+const MESSAGE_OVERHEAD: usize = 72;
+
+pub fn encoded_len(message: &Message) -> usize {
+    MESSAGE_OVERHEAD + json_escaped_len(&message.value)
+}
+
+fn json_escaped_len(value: &str) -> usize {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'"' | b'\\' | 0x08 | 0x09 | 0x0a | 0x0c | 0x0d => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+        .sum()
+}
+
 impl From<Record> for Message {
     fn from(record: Record) -> Self {
         Message {

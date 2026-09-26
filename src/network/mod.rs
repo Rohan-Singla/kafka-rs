@@ -120,7 +120,7 @@ pub async fn dispatch(request: Request, broker: &Broker) -> Response {
             max_count,
         } => match broker.fetch(&topic, partition, offset, max_count).await {
             Ok(records) => Response::Messages {
-                messages: records.into_iter().map(Message::from).collect(),
+                messages: fit_into_one_frame(records),
             },
             Err(e) => e.into(),
         },
@@ -147,10 +147,10 @@ pub async fn dispatch(request: Request, broker: &Broker) -> Response {
         },
 
         Request::ListTopics => Response::Topics {
-            topics: broker.list_topics(),
+            topics: broker.list_topics().await,
         },
 
-        Request::DescribeTopic { topic } => match broker.describe_topic(&topic) {
+        Request::DescribeTopic { topic } => match broker.describe_topic(&topic).await {
             Ok(info) => Response::Topic { topic: info },
             Err(e) => e.into(),
         },
@@ -198,6 +198,24 @@ pub async fn dispatch(request: Request, broker: &Broker) -> Response {
             Err(e) => e.into(),
         },
     }
+}
+
+const FRAME_HEADROOM: usize = 4096;
+
+fn fit_into_one_frame(records: Vec<crate::storage::Record>) -> Vec<Message> {
+    let mut budget = MAX_FRAME_SIZE.saturating_sub(FRAME_HEADROOM);
+    let mut messages = Vec::with_capacity(records.len());
+
+    for record in records {
+        let message = Message::from(record);
+        let len = protocol::encoded_len(&message);
+        if !messages.is_empty() && len > budget {
+            break;
+        }
+        budget = budget.saturating_sub(len);
+        messages.push(message);
+    }
+    messages
 }
 
 impl From<crate::error::Error> for Response {

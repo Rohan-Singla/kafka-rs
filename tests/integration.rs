@@ -457,6 +457,34 @@ async fn a_huge_fetch_is_capped_instead_of_dropping_the_connection() {
         .await
         .unwrap();
     assert!(!next.is_empty(), "the connection survived and kept serving");
+
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn payloads_that_expand_under_json_escaping_still_get_delivered() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = RunningBroker::start(dir.path().to_path_buf()).await;
+
+    let mut producer = Producer::connect(&broker.addr).await.unwrap();
+    producer.create_topic("escaped", 1).await.unwrap();
+
+    let payload = "\u{1}".repeat(1024 * 1024);
+    for _ in 0..4 {
+        producer.send_to("escaped", 0, &payload).await.unwrap();
+    }
+
+    let mut consumer = Consumer::connect(&broker.addr).await.unwrap();
+    let records = consumer.poll_partition("escaped", 0, 0, 500).await.unwrap();
+
+    assert!(
+        !records.is_empty(),
+        "a batch inside the on-disk budget became undeliverable once escaped"
+    );
+    assert_eq!(records[0].value.len(), payload.len());
+    assert_eq!(records[0].value, payload);
+
+    broker.stop().await;
 }
 
 #[tokio::test]

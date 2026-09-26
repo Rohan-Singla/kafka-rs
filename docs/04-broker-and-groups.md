@@ -8,8 +8,9 @@ Files: `src/broker/`.
 pub struct Broker {
     config: BrokerConfig,
     topics: DashMap<String, Vec<Arc<RwLock<Partition>>>>,
-    offsets: OffsetStore,
+    offsets: Arc<OffsetStore>,
     coordinator: Coordinator,
+    create_lock: tokio::sync::Mutex<()>,
 }
 ```
 
@@ -192,9 +193,18 @@ guard.read_from(offset, max_count, MAX_FETCH_BYTES)
 ```
 
 A count cap alone stops `usize::MAX` records being requested, but 10,000 records
-of 8MB each still comes to 80GB. The byte budget is the cap that actually
-bounds memory, and it also keeps the response under the 16MB frame limit, since
-a response that cannot be framed cannot be delivered at all.
+of 8MB each still comes to 80GB. The byte budget is the cap that bounds memory.
+
+It does **not** bound the frame, and that catch is worth understanding. The
+budget counts bytes on disk, but the response carries payloads as JSON strings,
+and JSON escaping expands a control character sixfold: one stored byte becomes
+the six characters `\u0001`. So 4MB of the wrong bytes serializes to 24MB and
+overruns the 16MB frame.
+
+The frame is bounded separately, in `fit_into_one_frame`, which measures each
+message's *escaped* length and stops before the limit. Two different budgets
+because there are two different resources: memory on the way out of the disk,
+and the frame on the way out of the socket.
 
 `commit_offset` also goes through `spawn_blocking`, for the same reason as
 `produce`: with `--fsync` on, it does a real disk sync.

@@ -162,13 +162,19 @@ impl Broker {
         let topic = name.to_string();
 
         let partitions = spawn_blocking(move || {
+            let topic_dir = data_dir.join(&topic);
             let mut partitions = Vec::with_capacity(partition_count as usize);
+
             for id in 0..partition_count {
-                let dir = data_dir.join(&topic).join(format!("partition-{}", id));
-                partitions.push(Arc::new(RwLock::new(Partition::with_segment_size(
-                    dir,
-                    segment_size,
-                )?)));
+                let dir = topic_dir.join(format!("partition-{}", id));
+                match Partition::with_segment_size(dir, segment_size) {
+                    Ok(partition) => partitions.push(Arc::new(RwLock::new(partition))),
+                    Err(e) => {
+                        drop(partitions);
+                        let _ = fs::remove_dir_all(&topic_dir);
+                        return Err(e);
+                    }
+                }
             }
             Ok(partitions)
         })
@@ -280,40 +286,33 @@ impl Broker {
             .leave(group, member_id, &self.partition_counts())
     }
 
-    pub fn list_topics(&self) -> Vec<TopicInfo> {
-        let mut names: Vec<String> = self.topics.iter().map(|e| e.key().clone()).collect();
-        names.sort();
-        names
-            .into_iter()
-            .filter_map(|name| self.describe_topic(&name).ok())
-            .collect()
+    pub async fn list_topics(&self) -> Vec<TopicInfo> {
+        let mut snapshot: Vec<(String, Vec<Arc<RwLock<Partition>>>)> = self
+            .topics
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        snapshot.sort_by(|a, b| a.0.cmp(&b.0));
+
+        spawn_blocking(move || {
+            Ok(snapshot
+                .into_iter()
+                .map(|(name, handles)| topic_info(name, &handles))
+                .collect())
+        })
+        .await
+        .unwrap_or_default()
     }
 
-    pub fn describe_topic(&self, topic: &str) -> Result<TopicInfo> {
-        let entry = self
+    pub async fn describe_topic(&self, topic: &str) -> Result<TopicInfo> {
+        let handles: Vec<Arc<RwLock<Partition>>> = self
             .topics
             .get(topic)
-            .ok_or_else(|| Error::UnknownTopic(topic.to_string()))?;
+            .ok_or_else(|| Error::UnknownTopic(topic.to_string()))?
+            .clone();
 
-        let partitions = entry
-            .iter()
-            .enumerate()
-            .map(|(id, handle)| {
-                let guard = handle.read().unwrap_or_else(|e| e.into_inner());
-                PartitionInfo {
-                    partition: id as u32,
-                    start_offset: guard.start_offset(),
-                    next_offset: guard.next_offset(),
-                    size_bytes: guard.size(),
-                    segments: guard.segment_count(),
-                }
-            })
-            .collect();
-
-        Ok(TopicInfo {
-            name: topic.to_string(),
-            partitions,
-        })
+        let name = topic.to_string();
+        spawn_blocking(move || Ok(topic_info(name, &handles))).await
     }
 
     pub fn list_groups(&self) -> Vec<GroupSummary> {
@@ -354,6 +353,25 @@ impl Broker {
     pub fn config(&self) -> &BrokerConfig {
         &self.config
     }
+}
+
+fn topic_info(name: String, handles: &[Arc<RwLock<Partition>>]) -> TopicInfo {
+    let partitions = handles
+        .iter()
+        .enumerate()
+        .map(|(id, handle)| {
+            let guard = handle.read().unwrap_or_else(|e| e.into_inner());
+            PartitionInfo {
+                partition: id as u32,
+                start_offset: guard.start_offset(),
+                next_offset: guard.next_offset(),
+                size_bytes: guard.size(),
+                segments: guard.segment_count(),
+            }
+        })
+        .collect();
+
+    TopicInfo { name, partitions }
 }
 
 pub const MAX_FETCH_COUNT: usize = 10_000;
@@ -540,7 +558,7 @@ mod tests {
         broker.produce("orders", 0, b"one".to_vec()).await.unwrap();
         broker.produce("orders", 0, b"two".to_vec()).await.unwrap();
 
-        let info = broker.describe_topic("orders").unwrap();
+        let info = broker.describe_topic("orders").await.unwrap();
         assert_eq!(info.partitions.len(), 2);
         assert_eq!(info.partitions[0].next_offset, 2);
         assert_eq!(info.partitions[1].next_offset, 0);
