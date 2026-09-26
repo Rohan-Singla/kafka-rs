@@ -1,6 +1,23 @@
 use std::{fmt, io};
 
+use serde::{Deserialize, Serialize};
+
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    #[default]
+    Unknown,
+    UnknownTopic,
+    UnknownPartition,
+    UnknownGroup,
+    UnknownMember,
+    StaleGeneration,
+    OffsetOutOfRange,
+    InvalidTopicName,
+    TooLarge,
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -16,8 +33,25 @@ pub enum Error {
     OffsetOutOfRange { offset: u64, next_offset: u64 },
     InvalidTopicName(String),
     Protocol(String),
-    Broker(String),
+    Broker { reason: String, code: ErrorCode },
     Disconnected,
+}
+
+impl Error {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Error::UnknownTopic(_) => ErrorCode::UnknownTopic,
+            Error::UnknownPartition { .. } => ErrorCode::UnknownPartition,
+            Error::UnknownGroup(_) => ErrorCode::UnknownGroup,
+            Error::UnknownMember { .. } => ErrorCode::UnknownMember,
+            Error::StaleGeneration { .. } => ErrorCode::StaleGeneration,
+            Error::OffsetOutOfRange { .. } => ErrorCode::OffsetOutOfRange,
+            Error::InvalidTopicName(_) => ErrorCode::InvalidTopicName,
+            Error::FrameTooLarge { .. } => ErrorCode::TooLarge,
+            Error::Broker { code, .. } => *code,
+            _ => ErrorCode::Unknown,
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -54,7 +88,7 @@ impl fmt::Display for Error {
             ),
             Error::InvalidTopicName(n) => write!(f, "invalid topic name '{}'", n),
             Error::Protocol(m) => write!(f, "protocol error: {}", m),
-            Error::Broker(m) => write!(f, "{}", m),
+            Error::Broker { reason, .. } => write!(f, "{}", reason),
             Error::Disconnected => write!(f, "peer closed the connection"),
         }
     }

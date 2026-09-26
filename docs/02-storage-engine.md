@@ -155,6 +155,15 @@ Everything before the first bad record is kept. Everything from it onward is
 dropped. The log is truncated to the last good boundary and the index is
 rebuilt to match.
 
+**A failed read is not a torn tail.** Every `stop` above is a judgement that the
+bytes are bad, and the response to it is `set_len`, which destroys everything
+after that point. A read that fails outright (EIO, a network filesystem
+hiccup) says nothing about the bytes; it says the disk did not answer. Treating
+the two the same would turn a transient error into permanent data loss, so a
+read error aborts the open and leaves the file untouched. The length checks
+before it are what make that distinction safe: running out of file is already
+handled explicitly, so an error reaching the read really is a failure.
+
 The offset continuity check (`header.offset != expected`) is doing real work
 alongside the checksum: it catches a record that is internally valid but landed
 in the wrong place, which is what the old version of this code produced when it

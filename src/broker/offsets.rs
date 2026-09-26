@@ -8,11 +8,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
+const COMPACT_AFTER_APPENDS: u64 = 10_000;
+
 pub struct OffsetStore {
     path: PathBuf,
-    journal: Mutex<File>,
+    journal: Mutex<Journal>,
     offsets: DashMap<OffsetKey, u64>,
     fsync: bool,
+}
+
+struct Journal {
+    file: File,
+    appends: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -36,11 +43,11 @@ impl OffsetStore {
 
         Self::compact(&path, &offsets)?;
 
-        let journal = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         Ok(Self {
             path,
-            journal: Mutex::new(journal),
+            journal: Mutex::new(Journal { file, appends: 0 }),
             offsets,
             fsync,
         })
@@ -110,11 +117,12 @@ impl OffsetStore {
         })?;
 
         let mut journal = self.journal.lock().unwrap_or_else(|e| e.into_inner());
-        journal.write_all(line.as_bytes())?;
-        journal.write_all(b"\n")?;
+        journal.file.write_all(line.as_bytes())?;
+        journal.file.write_all(b"\n")?;
         if self.fsync {
-            journal.sync_data()?;
+            journal.file.sync_data()?;
         }
+        journal.appends += 1;
 
         self.offsets.insert(
             OffsetKey {
@@ -124,6 +132,18 @@ impl OffsetStore {
             },
             offset,
         );
+
+        if journal.appends >= COMPACT_AFTER_APPENDS
+            && journal.appends >= 2 * self.offsets.len() as u64
+        {
+            Self::compact(&self.path, &self.offsets)?;
+            journal.file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            journal.appends = 0;
+        }
+
         drop(journal);
         Ok(())
     }
@@ -242,5 +262,28 @@ mod tests {
 
         let store = OffsetStore::open(path, false).unwrap();
         assert_eq!(store.fetch("g", "t", 0), 11);
+    }
+
+    #[test]
+    fn the_journal_compacts_while_the_broker_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("__offsets.json");
+
+        let store = OffsetStore::open(path.clone(), false).unwrap();
+        for offset in 0..COMPACT_AFTER_APPENDS + 100 {
+            store.commit("g", "t", 0, offset).unwrap();
+        }
+
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            size < 8 * 1024,
+            "journal should have compacted in place, got {} bytes",
+            size
+        );
+        assert_eq!(store.fetch("g", "t", 0), COMPACT_AFTER_APPENDS + 99);
+
+        drop(store);
+        let reopened = OffsetStore::open(path, false).unwrap();
+        assert_eq!(reopened.fetch("g", "t", 0), COMPACT_AFTER_APPENDS + 99);
     }
 }

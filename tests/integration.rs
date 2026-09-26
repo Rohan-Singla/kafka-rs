@@ -18,8 +18,12 @@ struct RunningBroker {
 
 impl RunningBroker {
     async fn start(data_dir: PathBuf) -> Self {
+        Self::start_with_timeout(data_dir, Duration::from_secs(60)).await
+    }
+
+    async fn start_with_timeout(data_dir: PathBuf, session_timeout: Duration) -> Self {
         let mut config = BrokerConfig::new(data_dir);
-        config.session_timeout = Duration::from_secs(60);
+        config.session_timeout = session_timeout;
 
         let broker = Arc::new(Broker::open(config).expect("broker should open"));
         let server = Server::bind(broker, "127.0.0.1:0")
@@ -324,7 +328,7 @@ async fn errors_come_back_without_killing_the_connection() {
     let mut producer = Producer::connect(&broker.addr).await.unwrap();
 
     let rejected = producer.send_to("ghost", 0, "x").await;
-    assert!(matches!(rejected, Err(Error::Broker(_))));
+    assert!(matches!(rejected, Err(Error::Broker { .. })));
     assert_eq!(
         rejected.unwrap_err().to_string(),
         "unknown topic 'ghost'",
@@ -549,6 +553,120 @@ async fn a_consumer_must_subscribe_before_polling() {
     let mut consumer = Consumer::connect(&broker.addr).await.unwrap();
     assert!(matches!(consumer.poll(10).await, Err(Error::Protocol(_))));
     assert!(matches!(consumer.commit().await, Err(Error::Protocol(_))));
+
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn an_evicted_consumer_rejoins_instead_of_wedging() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker =
+        RunningBroker::start_with_timeout(dir.path().to_path_buf(), Duration::from_millis(100))
+            .await;
+
+    let mut producer = Producer::connect(&broker.addr).await.unwrap();
+    producer.create_topic("orders", 1).await.unwrap();
+    for i in 0..4 {
+        producer.send_to("orders", 0, &format!("m{}", i)).await.unwrap();
+    }
+
+    let mut consumer = Consumer::connect(&broker.addr).await.unwrap();
+    consumer.subscribe("g", &["orders"]).await.unwrap();
+    assert!(!consumer.poll(2).await.unwrap().is_empty());
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut delivered = Vec::new();
+    for _ in 0..6 {
+        let batch = consumer
+            .poll(10)
+            .await
+            .expect("an evicted consumer should rejoin, not fail forever");
+        delivered.extend(batch.into_iter().map(|r| r.value));
+    }
+
+    assert!(
+        !delivered.is_empty(),
+        "consumer never recovered after eviction"
+    );
+
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn resubscribing_does_not_strand_partitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = RunningBroker::start(dir.path().to_path_buf()).await;
+
+    let mut producer = Producer::connect(&broker.addr).await.unwrap();
+    producer.create_topic("orders", 4).await.unwrap();
+
+    let mut consumer = Consumer::connect(&broker.addr).await.unwrap();
+    consumer.subscribe("g", &["orders"]).await.unwrap();
+    consumer.subscribe("g", &["orders"]).await.unwrap();
+
+    assert_eq!(
+        consumer.assignment().len(),
+        4,
+        "the previous membership should have been released"
+    );
+
+    let mut admin = Consumer::connect(&broker.addr).await.unwrap();
+    let (description, _) = admin.describe_group("g").await.unwrap();
+    assert_eq!(description.members.len(), 1);
+
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn committing_past_the_end_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = RunningBroker::start(dir.path().to_path_buf()).await;
+
+    let mut producer = Producer::connect(&broker.addr).await.unwrap();
+    producer.create_topic("orders", 1).await.unwrap();
+    producer.send_to("orders", 0, "only").await.unwrap();
+
+    let mut consumer = Consumer::connect(&broker.addr).await.unwrap();
+    consumer.subscribe("g", &["orders"]).await.unwrap();
+
+    assert!(matches!(
+        consumer.commit_to("g", "orders", 0, 99).await,
+        Err(Error::Broker { .. })
+    ));
+    assert!(
+        consumer
+            .commit_to("g", "orders", 0, 1)
+            .await
+            .is_ok(),
+        "committing the next offset is legitimate"
+    );
+    assert!(matches!(
+        consumer.commit_to("g", "nosuchtopic", 0, 0).await,
+        Err(Error::Broker { .. })
+    ));
+
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn creating_a_topic_will_not_orphan_existing_partitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = RunningBroker::start(dir.path().to_path_buf()).await;
+
+    let mut producer = Producer::connect(&broker.addr).await.unwrap();
+    producer.create_topic("orders", 4).await.unwrap();
+    broker.stop().await;
+
+    std::fs::remove_dir_all(dir.path().join("orders").join("partition-2")).unwrap();
+
+    let broker = RunningBroker::start(dir.path().to_path_buf()).await;
+    let mut producer = Producer::connect(&broker.addr).await.unwrap();
+
+    assert!(
+        producer.create_topic("orders", 2).await.is_err(),
+        "partition-3 would have been orphaned"
+    );
 
     broker.stop().await;
 }

@@ -77,7 +77,7 @@ async fn run(args: Vec<String>) -> Result<()> {
     match command {
         "create-topic" => {
             let name = require(rest, 0, "create-topic needs a topic name")?;
-            let partitions = flag_u64(&flags, "partitions")?.unwrap_or(1) as u32;
+            let partitions = flag_u32(&flags, "partitions")?.unwrap_or(1);
 
             let mut producer = Producer::connect(&broker).await?;
             producer.create_topic(&name, partitions).await?;
@@ -135,8 +135,8 @@ async fn run(args: Vec<String>) -> Result<()> {
             let message = require(rest, 1, "produce needs a message")?;
 
             let mut producer = Producer::connect(&broker).await?;
-            let offset = match flag_u64(&flags, "partition")? {
-                Some(partition) => producer.send_to(&topic, partition as u32, &message).await?,
+            let offset = match flag_u32(&flags, "partition")? {
+                Some(partition) => producer.send_to(&topic, partition, &message).await?,
                 None => producer.send(&topic, &message).await?,
             };
             println!("wrote to offset {}", offset);
@@ -144,7 +144,7 @@ async fn run(args: Vec<String>) -> Result<()> {
 
         "consume" => {
             let topic = require(rest, 0, "consume needs a topic name")?;
-            let partition = flag_u64(&flags, "partition")?.unwrap_or(0) as u32;
+            let partition = flag_u32(&flags, "partition")?.unwrap_or(0);
             let from = flag_u64(&flags, "from")?.unwrap_or(0);
             let max = flag_u64(&flags, "max")?.unwrap_or(100) as usize;
 
@@ -244,6 +244,15 @@ fn flag_u64(flags: &[(String, String)], name: &str) -> Result<Option<u64>> {
     match flags.iter().find(|(k, _)| k == name) {
         None => Ok(None),
         Some((_, value)) => value.parse::<u64>().map(Some).map_err(|_| {
+            kafka_rust::Error::Protocol(format!("--{} expects a number, got '{}'", name, value))
+        }),
+    }
+}
+
+fn flag_u32(flags: &[(String, String)], name: &str) -> Result<Option<u32>> {
+    match flags.iter().find(|(k, _)| k == name) {
+        None => Ok(None),
+        Some((_, value)) => value.parse::<u32>().map(Some).map_err(|_| {
             kafka_rust::Error::Protocol(format!("--{} expects a number, got '{}'", name, value))
         }),
     }

@@ -36,7 +36,7 @@ cargo run --release --example consumer
 ```
 
 ```bash
-cargo test                                # 61 tests
+cargo test                                # 75 tests
 cargo clippy --all-targets                # clean
 cargo fmt --check                         # clean
 ```

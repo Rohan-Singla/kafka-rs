@@ -75,6 +75,13 @@ the resulting state. That rewrite is compaction: without it the file grows
 forever, since a consumer committing once a second writes 86,400 lines a day
 while only the final one matters.
 
+Compaction on startup alone is not enough, because a broker that stays up for
+weeks never gets one. So `commit` also compacts in place once the journal has
+taken 10,000 appends *and* holds at least twice as many lines as there are
+distinct group/topic/partition keys. The second condition is what stops a
+workload with 50,000 real keys from recompacting on every commit: the trigger
+has to be redundancy, not size alone.
+
 The rewrite goes to a temp file and then `rename`, which is atomic on POSIX. A
 crash mid compaction leaves either the old complete file or the new complete
 file, never a half written one.
@@ -142,6 +149,12 @@ group, so partition count is the parallelism ceiling.
 A member that stops heartbeating is dropped after the session timeout (30s by
 default) and its partitions are redistributed.
 
+From the evicted client's side this is survivable. `Consumer::poll` heartbeats
+first, so an eviction shows up as an `unknown_member` error on the next poll,
+and the consumer rejoins the group under a fresh member id instead of returning
+that error to the caller forever. It resumes from the committed offset, which is
+the honest answer: anything polled but not committed is delivered again.
+
 Eviction is **lazy**: it happens at the start of each `join` and `heartbeat`
 rather than on a timer. There is no background thread, and nothing is missed,
 because the surviving members are heartbeating and each of those calls triggers
@@ -150,6 +163,24 @@ who cares.
 
 `leave` is the polite path. It removes the member immediately and rebalances, so
 the group recovers straight away instead of waiting out the timeout.
+
+### Delivery is at least once
+
+Worth stating plainly, because it is a property of the design rather than an
+oversight. A rebalance can move a partition to another member while the previous
+owner has polled records it has not committed. Those records are handed to the
+new owner as well, so the application sees them twice.
+
+Nothing here silently commits on your behalf to paper over that. A commit means
+"I have finished with everything before this offset", and only the application
+knows when that is true. Committing automatically on revocation would turn
+redelivery into *silent message loss* whenever a consumer was interrupted
+mid-work, which is the strictly worse failure.
+
+So the contract is: handlers should be idempotent, and `commit()` should be
+called at whatever boundary makes them so. Exactly-once would need the commit
+and the side effect to land atomically, which is a transaction protocol this
+project does not have.
 
 ## The concurrency model
 

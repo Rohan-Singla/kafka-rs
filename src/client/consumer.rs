@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::{Connection, unexpected};
 use crate::broker::groups::{GroupDescription, GroupSummary, TopicPartition};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::network::protocol::{CommittedOffset, Request, Response};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +18,7 @@ pub struct Consumer {
     connection: Connection,
     group: Option<String>,
     member_id: Option<String>,
+    topics: Vec<String>,
     generation: u64,
     assignment: Vec<TopicPartition>,
     positions: HashMap<TopicPartition, u64>,
@@ -30,6 +31,7 @@ impl Consumer {
             connection: Connection::connect(addr).await?,
             group: None,
             member_id: None,
+            topics: Vec::new(),
             generation: 0,
             assignment: Vec::new(),
             positions: HashMap::new(),
@@ -38,11 +40,27 @@ impl Consumer {
     }
 
     pub async fn subscribe(&mut self, group: &str, topics: &[&str]) -> Result<()> {
+        if self.group.is_some() && self.member_id.is_some() {
+            let _ = self.leave().await;
+        }
+
+        self.topics = topics.iter().map(|t| t.to_string()).collect();
+        self.group = Some(group.to_string());
+        self.positions.clear();
+        self.join().await
+    }
+
+    async fn join(&mut self) -> Result<()> {
+        let group = self
+            .group
+            .clone()
+            .ok_or_else(|| Error::Protocol("consumer is not subscribed to a group".to_string()))?;
+
         let response = self
             .connection
             .send(Request::JoinGroup {
-                group: group.to_string(),
-                topics: topics.iter().map(|t| t.to_string()).collect(),
+                group,
+                topics: self.topics.clone(),
             })
             .await?;
 
@@ -55,7 +73,6 @@ impl Consumer {
             return Err(unexpected(response));
         };
 
-        self.group = Some(group.to_string());
         self.member_id = Some(member_id);
         self.generation = generation;
         self.cursor = 0;
@@ -66,13 +83,26 @@ impl Consumer {
     pub async fn poll(&mut self, max_count: usize) -> Result<Vec<ConsumerRecord>> {
         let (group, member_id) = self.group_identity()?;
 
-        let response = self
+        let beat = self
             .connection
             .send(Request::Heartbeat {
                 group: group.clone(),
                 member_id: member_id.clone(),
             })
-            .await?;
+            .await;
+
+        let response = match beat {
+            Ok(response) => response,
+            Err(Error::Broker { reason, code })
+                if code == ErrorCode::UnknownMember || code == ErrorCode::UnknownGroup =>
+            {
+                tracing::warn!("evicted from group '{}' ({}), rejoining", group, reason);
+                self.member_id = None;
+                self.join().await?;
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(e),
+        };
 
         let Response::Assignment {
             generation,
@@ -161,6 +191,23 @@ impl Consumer {
         max_count: usize,
     ) -> Result<Vec<ConsumerRecord>> {
         self.fetch_partition(topic, partition, offset, max_count)
+            .await
+    }
+
+    pub async fn commit_to(
+        &mut self,
+        group: &str,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Result<()> {
+        self.connection
+            .expect_ok(Request::CommitOffset {
+                group: group.to_string(),
+                topic: topic.to_string(),
+                partition,
+                offset,
+            })
             .await
     }
 

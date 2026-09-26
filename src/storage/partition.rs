@@ -19,6 +19,7 @@ impl Partition {
     }
 
     pub fn with_segment_size(dir: PathBuf, max_segment_size: u64) -> Result<Self> {
+        let max_segment_size = max_segment_size.max(1);
         fs::create_dir_all(&dir)?;
 
         let mut base_offsets = Self::existing_base_offsets(&dir)?;
@@ -365,5 +366,22 @@ mod tests {
             1,
             "a budget below one record must still return one"
         );
+    }
+
+    #[test]
+    fn a_zero_segment_size_does_not_duplicate_base_offsets() {
+        let dir = temp_dir();
+        let mut partition = Partition::with_segment_size(dir.path().to_path_buf(), 0).unwrap();
+
+        for i in 0..4 {
+            partition.append(format!("m{}", i).as_bytes()).unwrap();
+        }
+
+        let bases: Vec<u64> = partition.segments.iter().map(|s| s.base_offset).collect();
+        let mut sorted = bases.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(bases, sorted, "base offsets must be strictly increasing");
+        assert_eq!(partition.read(3).unwrap().value, b"m3");
     }
 }

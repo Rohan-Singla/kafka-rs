@@ -95,7 +95,17 @@ Defined in `src/network/protocol.rs`.
 | `ListGroups` | | `Groups` |
 | `DescribeGroup` | group | `Group` |
 
-Any of them can come back as `{"type":"Error","reason":"..."}` instead.
+Any of them can come back as `{"type":"Error","reason":"...","code":"..."}` instead.
+
+The `reason` is prose for a human. The `code` is the part a client can branch on:
+`unknown_member`, `stale_generation`, `unknown_topic`, `offset_out_of_range` and
+so on, defaulting to `unknown`. Both are carried because they answer different
+questions, and matching on the prose would break the moment the wording changed.
+
+The one place it is load bearing today is eviction. A consumer that stops
+polling for longer than the session timeout is removed from its group, and every
+later heartbeat fails. Seeing `unknown_member` is how `Consumer::poll` knows to
+rejoin rather than surface an error it could never recover from.
 
 ## Errors do not kill the connection
 

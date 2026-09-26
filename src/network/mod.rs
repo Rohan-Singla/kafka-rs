@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::broker::Broker;
-use crate::error::Result;
+use crate::error::{ErrorCode, Result};
 use protocol::{CommittedOffset, Message, Request, Response};
 
 pub use codec::MAX_FRAME_SIZE;
@@ -63,6 +63,7 @@ async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> Result
             Err(e) => {
                 let response = Response::Error {
                     reason: e.to_string(),
+                    code: e.code(),
                 };
                 let _ = codec::write_frame(&mut socket, &serde_json::to_vec(&response)?).await;
                 return Err(e);
@@ -73,6 +74,7 @@ async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> Result
             Ok(request) => dispatch(request, &broker).await,
             Err(e) => Response::Error {
                 reason: format!("malformed request: {}", e),
+                code: ErrorCode::Unknown,
             },
         };
 
@@ -84,6 +86,7 @@ async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> Result
                     payload.len(),
                     MAX_FRAME_SIZE
                 ),
+                code: ErrorCode::TooLarge,
             };
             payload = serde_json::to_vec(&refusal)?;
         }
@@ -113,6 +116,7 @@ pub async fn dispatch(request: Request, broker: &Broker) -> Response {
                         "message encodes to {} bytes, over the {} byte limit, and could never be read back",
                         encoded, MAX_DELIVERABLE_MESSAGE
                     ),
+                    code: ErrorCode::TooLarge,
                 };
             }
             match broker
@@ -232,6 +236,7 @@ fn fetch_response(records: Vec<crate::storage::Record>) -> Response {
                     MAX_DELIVERABLE_MESSAGE,
                     offset + 1
                 ),
+                code: ErrorCode::TooLarge,
             };
         }
         if len > remaining {
@@ -248,6 +253,7 @@ impl From<crate::error::Error> for Response {
     fn from(e: crate::error::Error) -> Self {
         Response::Error {
             reason: e.to_string(),
+            code: e.code(),
         }
     }
 }

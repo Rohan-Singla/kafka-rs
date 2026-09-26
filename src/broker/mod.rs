@@ -3,7 +3,7 @@ pub mod offsets;
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -163,6 +163,20 @@ impl Broker {
 
         let partitions = spawn_blocking(move || {
             let topic_dir = data_dir.join(&topic);
+
+            if let Some(stray) = highest_partition_id(&topic_dir)?
+                .filter(|highest| *highest >= partition_count)
+            {
+                return Err(Error::Protocol(format!(
+                    "{} already holds partition-{}, so '{}' cannot be created with {} partition(s) \
+                     without orphaning data",
+                    topic_dir.display(),
+                    stray,
+                    topic,
+                    partition_count
+                )));
+            }
+
             let mut partitions = Vec::with_capacity(partition_count as usize);
             let mut created: Vec<PathBuf> = Vec::new();
 
@@ -273,6 +287,18 @@ impl Broker {
         partition: u32,
         offset: u64,
     ) -> Result<()> {
+        let handle = self.partition_handle(topic, partition)?;
+        let next_offset = {
+            let guard = handle.read().unwrap_or_else(|e| e.into_inner());
+            guard.next_offset()
+        };
+        if offset > next_offset {
+            return Err(Error::OffsetOutOfRange {
+                offset,
+                next_offset,
+            });
+        }
+
         let offsets = Arc::clone(&self.offsets);
         let (group, topic) = (group.to_string(), topic.to_string());
 
@@ -369,6 +395,22 @@ impl Broker {
     pub fn config(&self) -> &BrokerConfig {
         &self.config
     }
+}
+
+fn highest_partition_id(topic_dir: &Path) -> Result<Option<u32>> {
+    if !topic_dir.exists() {
+        return Ok(None);
+    }
+    Ok(fs::read_dir(topic_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()
+                .and_then(|n| n.strip_prefix("partition-"))
+                .and_then(|n| n.parse::<u32>().ok())
+        })
+        .max())
 }
 
 fn topic_info(name: String, handles: &[Arc<RwLock<Partition>>]) -> TopicInfo {
@@ -499,6 +541,12 @@ mod tests {
         {
             let broker = test_broker(&dir);
             broker.create_topic("orders", 1).await.unwrap();
+            for i in 0..20 {
+                broker
+                    .produce("orders", 0, format!("m{}", i).into_bytes())
+                    .await
+                    .unwrap();
+            }
             broker
                 .commit_offset("analytics", "orders", 0, 17)
                 .await

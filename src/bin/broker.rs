@@ -106,12 +106,17 @@ fn parse_args(args: &[String]) -> Result<Option<Parsed>, String> {
                 if mb == 0 {
                     return Err("--segment-size must be at least 1".to_string());
                 }
-                config.segment_size = mb * 1024 * 1024;
+                config.segment_size = mb
+                    .checked_mul(1024 * 1024)
+                    .ok_or_else(|| format!("--segment-size {} megabytes is too large", mb))?;
             }
             "--session-timeout" => {
                 let secs: u64 = take(args, &mut i, "--session-timeout")?
                     .parse()
                     .map_err(|_| "--session-timeout expects a number of seconds".to_string())?;
+                if secs == 0 {
+                    return Err("--session-timeout must be at least 1".to_string());
+                }
                 config.session_timeout = Duration::from_secs(secs);
             }
             other => return Err(format!("unknown option '{}'", other)),

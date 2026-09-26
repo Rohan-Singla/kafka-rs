@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::error::ErrorCode;
+
 use crate::broker::TopicInfo;
 use crate::broker::groups::{GroupDescription, GroupSummary, TopicPartition};
 use crate::storage::Record;
@@ -85,6 +87,8 @@ pub enum Response {
     },
     Error {
         reason: String,
+        #[serde(default)]
+        code: ErrorCode,
     },
 }
 

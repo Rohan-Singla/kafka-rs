@@ -55,9 +55,7 @@ impl Segment {
 
         while position + HEADER_LEN as u64 <= file_len {
             let mut header_buf = [0u8; HEADER_LEN];
-            if read_exact_at(&self.log, &mut header_buf, position).is_err() {
-                break;
-            }
+            read_exact_at(&self.log, &mut header_buf, position)?;
             let header = record::decode_header(&header_buf);
 
             if header.offset != expected_offset || header.length > MAX_RECORD_SIZE {
@@ -69,9 +67,7 @@ impl Segment {
             }
 
             let mut value = vec![0u8; header.length as usize];
-            if read_exact_at(&self.log, &mut value, position + HEADER_LEN as u64).is_err() {
-                break;
-            }
+            read_exact_at(&self.log, &mut value, position + HEADER_LEN as u64)?;
             if record::checksum(header.offset, header.timestamp, &value) != header.crc {
                 break;
             }
