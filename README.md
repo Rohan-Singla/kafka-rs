@@ -200,6 +200,8 @@ All commands take `--broker <addr>`, defaulting to `127.0.0.1:9092`.
 
 Measured over loopback TCP against a release build. Apple M5, 10 cores, macOS 26.6. 128 byte payloads, one partition per producer, `bench` binary in this repo.
 
+These are single machine numbers and they move with whatever else that machine is doing. A repeat run with one core busy elsewhere came back 14 to 17 percent lower across the board. Treat the shape (how throughput scales with producers, how far fsync sets it back) as the result, and re-run the command below for figures that mean anything on your hardware.
+
 Every message is a full request and response round trip. There is no batching, so these are per message numbers, not amortised ones.
 
 **Produce**
