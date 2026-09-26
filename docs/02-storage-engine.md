@@ -73,10 +73,10 @@ Code: `Segment::read` in `src/storage/segment.rs`.
 
 ### The tradeoff
 
-One index entry per message means a million messages costs 16MB of index. Real
-Kafka indexes only every Nth message and scans the short gap between entries,
-trading a little read time for a much smaller index. That is listed as "sparse
-indexing" in the README's next steps.
+One index entry per message means a million messages costs 16MB of index. That
+is the price of making a lookup pure arithmetic. Real Kafka indexes only every
+Nth message and scans the short gap between entries, spending a little read time
+to carry a much smaller index.
 
 ### Sequential reads skip the index
 

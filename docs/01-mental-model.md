@@ -83,9 +83,9 @@ listing sorts correctly. Only the newest segment is written to. Once it passes
 00000000000000481232.log     <- active, being appended to
 ```
 
-**Why bother splitting?** So old data can eventually be deleted a chunk at a
-time, and so no single file grows unbounded. Deleting old segments is not built
-yet, but the layout is ready for it.
+**Why bother splitting?** So no single file grows unbounded, and so the file
+being appended to stays small enough that recovery only has to replay a bounded
+amount of log on startup. Sealed segments are never modified again, only read.
 
 ### Consumer group
 

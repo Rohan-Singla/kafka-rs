@@ -280,25 +280,18 @@ src/
     └── bench.rs             load generator
 ```
 
-## Design notes and limitations
+## Scope and design notes
 
-Things that are deliberate, and things that are simply not built yet.
+What this broker is, stated precisely, so the boundaries are not a surprise.
 
-**Single node.** No replication, no leader election, no ISR. This is the single biggest gap between this and real Kafka, and it is what the fsync default above is really about: Kafka can afford a loose fsync policy because it has replicas, and this cannot.
+**Single node.** One broker owns the data. No replication, no leader election, no ISR. This is what the fsync default above is really about: Kafka can run a loose fsync policy because a write lives in the page cache of several machines, and a single node has no such fallback.
 
-**JSON on the wire.** Readable and debuggable, and measurably slower than a binary encoding. The framing layer is separate from the payload encoding, so swapping it is contained. Message payloads are UTF-8 text at the protocol level even though the storage engine underneath is byte oriented.
+**JSON on the wire.** Readable and debuggable, and measurably slower than a binary encoding. The framing layer is separate from the payload encoding, so the two can be changed independently. Message payloads are UTF-8 text at the protocol level even though the storage engine underneath is byte oriented.
 
-**No batching.** Every message is its own round trip. Batched produce is the single largest throughput win still on the table and would likely be worth several times the current numbers.
+**One message per round trip.** Produce and fetch each carry a single request. Fetch returns a batch, so reads amortise the trip and run an order of magnitude faster than writes; produce does not, and the benchmark numbers above are per message rather than amortised.
 
-**No retention policy.** Segments accumulate forever. Deleting sealed segments past an age or size bound is the natural next piece, and the segment layout was built with it in mind.
+**Segments are kept, not reclaimed.** Every segment written stays on disk, which is what lets any consumer group replay the log from offset zero at any time. Nothing ages data out, so the data directory grows with the volume written to it.
 
-**Offsets are dense in the index.** One 16 byte index entry per message. Real Kafka indexes sparsely and scans the gap, trading a little read time for a much smaller index.
+**One index entry per message.** 16 bytes each, which makes an offset lookup pure arithmetic with no scanning. The cost is index size: a million messages carries 16MB of index.
 
-**Group assignment is round robin only.** No sticky assignment, so a rebalance can move a partition that did not need to move.
-
-### Next
-
-- Batch produce and fetch
-- Key based partitioning, so related messages land on the same partition by hash
-- Retention by age and size
-- Sparse indexing
+**Round robin partitioning and assignment.** Producers rotate through partitions, and group members are dealt partitions in rotation. Messages that must stay ordered relative to each other are pinned to one partition with `send_to`, since ordering is only guaranteed within a partition. A rebalance recomputes assignments from scratch rather than preserving existing ones.

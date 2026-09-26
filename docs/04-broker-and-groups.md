@@ -221,13 +221,11 @@ delivered back, it is refused at write time, where the error is actionable.
 or be written through the library directly rather than over the wire. It names
 the offset and the offset to resume from.
 
-Be aware of what that recovery currently costs. The resume offset is prose
-inside an error string, and `Consumer::poll` propagates a fetch failure with
-`?`, so one poisoned partition aborts the whole poll and starves the member's
-other partitions too. Stepping over the record means reading the offset out of
-the message by hand and driving `poll_partition` yourself. A structured
-response carrying `resume_from` as a field would fix that properly, and is not
-built.
+Be aware of what that recovery costs. The resume offset is prose inside an error
+string, and `Consumer::poll` propagates a fetch failure with `?`, so one
+poisoned partition aborts the whole poll and starves the member's other
+partitions too. Stepping over such a record means reading the offset out of the
+message and driving `poll_partition` directly rather than using `poll`.
 
 `commit_offset` also goes through `spawn_blocking`, for the same reason as
 `produce`: with `--fsync` on, it does a real disk sync.
