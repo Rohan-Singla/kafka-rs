@@ -105,13 +105,24 @@ pub async fn dispatch(request: Request, broker: &Broker) -> Response {
             topic,
             partition,
             message,
-        } => match broker
-            .produce(&topic, partition, message.into_bytes())
-            .await
-        {
-            Ok(offset) => Response::Offset { offset },
-            Err(e) => e.into(),
-        },
+        } => {
+            let encoded = protocol::encoded_value_len(&message);
+            if encoded > MAX_DELIVERABLE_MESSAGE {
+                return Response::Error {
+                    reason: format!(
+                        "message encodes to {} bytes, over the {} byte limit, and could never be read back",
+                        encoded, MAX_DELIVERABLE_MESSAGE
+                    ),
+                };
+            }
+            match broker
+                .produce(&topic, partition, message.into_bytes())
+                .await
+            {
+                Ok(offset) => Response::Offset { offset },
+                Err(e) => e.into(),
+            }
+        }
 
         Request::Fetch {
             topic,
@@ -119,9 +130,7 @@ pub async fn dispatch(request: Request, broker: &Broker) -> Response {
             offset,
             max_count,
         } => match broker.fetch(&topic, partition, offset, max_count).await {
-            Ok(records) => Response::Messages {
-                messages: fit_into_one_frame(records),
-            },
+            Ok(records) => fetch_response(records),
             Err(e) => e.into(),
         },
 
@@ -146,8 +155,9 @@ pub async fn dispatch(request: Request, broker: &Broker) -> Response {
             offset: broker.fetch_offset(&group, &topic, partition),
         },
 
-        Request::ListTopics => Response::Topics {
-            topics: broker.list_topics().await,
+        Request::ListTopics => match broker.list_topics().await {
+            Ok(topics) => Response::Topics { topics },
+            Err(e) => e.into(),
         },
 
         Request::DescribeTopic { topic } => match broker.describe_topic(&topic).await {
@@ -202,20 +212,36 @@ pub async fn dispatch(request: Request, broker: &Broker) -> Response {
 
 const FRAME_HEADROOM: usize = 4096;
 
-fn fit_into_one_frame(records: Vec<crate::storage::Record>) -> Vec<Message> {
-    let mut budget = MAX_FRAME_SIZE.saturating_sub(FRAME_HEADROOM);
+pub const MAX_DELIVERABLE_MESSAGE: usize = MAX_FRAME_SIZE - FRAME_HEADROOM;
+
+fn fetch_response(records: Vec<crate::storage::Record>) -> Response {
+    let mut remaining = MAX_DELIVERABLE_MESSAGE;
     let mut messages = Vec::with_capacity(records.len());
 
     for record in records {
+        let offset = record.offset;
         let message = Message::from(record);
         let len = protocol::encoded_len(&message);
-        if !messages.is_empty() && len > budget {
+
+        if messages.is_empty() && len > MAX_DELIVERABLE_MESSAGE {
+            return Response::Error {
+                reason: format!(
+                    "the record at offset {} encodes to {} bytes and cannot fit in a {} byte frame, resume from offset {} to skip it",
+                    offset,
+                    len,
+                    MAX_FRAME_SIZE,
+                    offset + 1
+                ),
+            };
+        }
+        if len > remaining {
             break;
         }
-        budget = budget.saturating_sub(len);
+        remaining -= len;
         messages.push(message);
     }
-    messages
+
+    Response::Messages { messages }
 }
 
 impl From<crate::error::Error> for Response {

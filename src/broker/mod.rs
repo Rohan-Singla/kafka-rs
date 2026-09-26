@@ -164,14 +164,23 @@ impl Broker {
         let partitions = spawn_blocking(move || {
             let topic_dir = data_dir.join(&topic);
             let mut partitions = Vec::with_capacity(partition_count as usize);
+            let mut created: Vec<PathBuf> = Vec::new();
 
             for id in 0..partition_count {
                 let dir = topic_dir.join(format!("partition-{}", id));
+                let preexisting = dir.exists();
+                if !preexisting {
+                    created.push(dir.clone());
+                }
+
                 match Partition::with_segment_size(dir, segment_size) {
                     Ok(partition) => partitions.push(Arc::new(RwLock::new(partition))),
                     Err(e) => {
                         drop(partitions);
-                        let _ = fs::remove_dir_all(&topic_dir);
+                        for dir in &created {
+                            let _ = fs::remove_dir_all(dir);
+                        }
+                        let _ = fs::remove_dir(&topic_dir);
                         return Err(e);
                     }
                 }
@@ -286,7 +295,7 @@ impl Broker {
             .leave(group, member_id, &self.partition_counts())
     }
 
-    pub async fn list_topics(&self) -> Vec<TopicInfo> {
+    pub async fn list_topics(&self) -> Result<Vec<TopicInfo>> {
         let mut snapshot: Vec<(String, Vec<Arc<RwLock<Partition>>>)> = self
             .topics
             .iter()
@@ -301,7 +310,6 @@ impl Broker {
                 .collect())
         })
         .await
-        .unwrap_or_default()
     }
 
     pub async fn describe_topic(&self, topic: &str) -> Result<TopicInfo> {

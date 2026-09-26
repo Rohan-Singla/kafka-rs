@@ -201,10 +201,26 @@ and JSON escaping expands a control character sixfold: one stored byte becomes
 the six characters `\u0001`. So 4MB of the wrong bytes serializes to 24MB and
 overruns the 16MB frame.
 
-The frame is bounded separately, in `fit_into_one_frame`, which measures each
+The frame is bounded separately, in `fetch_response`, which measures each
 message's *escaped* length and stops before the limit. Two different budgets
 because there are two different resources: memory on the way out of the disk,
 and the frame on the way out of the socket.
+
+### Anything accepted must be readable back
+
+There is a trap in having two limits. A produce request and a fetch response
+carry different fixed overhead, so a payload can fit inside an incoming frame
+and then fail to fit in the response that returns it. Stored successfully,
+impossible to read: the consumer hits that offset and stops there forever, and
+every later message on the partition is stranded behind it.
+
+So produce enforces the *fetch* budget, not its own. If a message could not be
+delivered back, it is refused at write time, where the error is actionable.
+
+`fetch_response` still guards the case, since a record could predate the check
+or be written through the library directly rather than over the wire. It names
+the offset and the offset to resume from, so a consumer can step over a record
+it cannot receive instead of stalling.
 
 `commit_offset` also goes through `spawn_blocking`, for the same reason as
 `produce`: with `--fsync` on, it does a real disk sync.

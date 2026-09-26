@@ -105,7 +105,11 @@ pub struct CommittedOffset {
 const MESSAGE_OVERHEAD: usize = 72;
 
 pub fn encoded_len(message: &Message) -> usize {
-    MESSAGE_OVERHEAD + json_escaped_len(&message.value)
+    encoded_value_len(&message.value)
+}
+
+pub fn encoded_value_len(value: &str) -> usize {
+    MESSAGE_OVERHEAD + json_escaped_len(value)
 }
 
 fn json_escaped_len(value: &str) -> usize {

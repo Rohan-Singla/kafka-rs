@@ -488,6 +488,30 @@ async fn payloads_that_expand_under_json_escaping_still_get_delivered() {
 }
 
 #[tokio::test]
+async fn a_message_that_could_never_be_read_back_is_refused_at_produce_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = RunningBroker::start(dir.path().to_path_buf()).await;
+
+    let mut producer = Producer::connect(&broker.addr).await.unwrap();
+    producer.create_topic("e", 1).await.unwrap();
+
+    let payload = "\u{1}".repeat(2_796_190);
+    let rejected = producer.send_to("e", 0, &payload).await;
+    assert!(
+        rejected.is_err(),
+        "accepting this wedges the partition: it fits a produce frame but not a fetch frame"
+    );
+
+    producer.send_to("e", 0, "still works").await.unwrap();
+    let mut consumer = Consumer::connect(&broker.addr).await.unwrap();
+    let records = consumer.poll_partition("e", 0, 0, 10).await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].value, "still works");
+
+    broker.stop().await;
+}
+
+#[tokio::test]
 async fn recreating_a_topic_with_a_different_partition_count_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let broker = RunningBroker::start(dir.path().to_path_buf()).await;

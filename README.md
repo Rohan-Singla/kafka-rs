@@ -240,7 +240,7 @@ cargo run --release --bin bench -- --messages 200000 --producers 16
 cargo test
 ```
 
-68 tests: 52 unit, 16 integration.
+69 tests: 52 unit, 17 integration.
 
 The integration tests boot a real broker on an ephemeral port and drive it with the real client over a real socket. The ones worth reading:
 
