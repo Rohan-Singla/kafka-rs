@@ -226,10 +226,10 @@ fn fetch_response(records: Vec<crate::storage::Record>) -> Response {
         if messages.is_empty() && len > MAX_DELIVERABLE_MESSAGE {
             return Response::Error {
                 reason: format!(
-                    "the record at offset {} encodes to {} bytes and cannot fit in a {} byte frame, resume from offset {} to skip it",
+                    "the record at offset {} encodes to {} bytes, over the {} byte limit, resume from offset {} to skip it",
                     offset,
                     len,
-                    MAX_FRAME_SIZE,
+                    MAX_DELIVERABLE_MESSAGE,
                     offset + 1
                 ),
             };

@@ -219,8 +219,15 @@ delivered back, it is refused at write time, where the error is actionable.
 
 `fetch_response` still guards the case, since a record could predate the check
 or be written through the library directly rather than over the wire. It names
-the offset and the offset to resume from, so a consumer can step over a record
-it cannot receive instead of stalling.
+the offset and the offset to resume from.
+
+Be aware of what that recovery currently costs. The resume offset is prose
+inside an error string, and `Consumer::poll` propagates a fetch failure with
+`?`, so one poisoned partition aborts the whole poll and starves the member's
+other partitions too. Stepping over the record means reading the offset out of
+the message by hand and driving `poll_partition` yourself. A structured
+response carrying `resume_from` as a field would fix that properly, and is not
+built.
 
 `commit_offset` also goes through `spawn_blocking`, for the same reason as
 `produce`: with `--fsync` on, it does a real disk sync.

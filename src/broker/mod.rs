@@ -180,7 +180,15 @@ impl Broker {
                         for dir in &created {
                             let _ = fs::remove_dir_all(dir);
                         }
-                        let _ = fs::remove_dir(&topic_dir);
+                        if fs::remove_dir(&topic_dir).is_err() {
+                            tracing::warn!(
+                                "topic '{}' failed to create but {} still holds partition data \
+                                 from an earlier attempt, so recreating it will be refused until \
+                                 that directory is removed by hand",
+                                topic,
+                                topic_dir.display()
+                            );
+                        }
                         return Err(e);
                     }
                 }

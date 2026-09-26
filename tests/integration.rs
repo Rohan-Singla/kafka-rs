@@ -497,9 +497,14 @@ async fn a_message_that_could_never_be_read_back_is_refused_at_produce_time() {
 
     let payload = "\u{1}".repeat(2_796_190);
     let rejected = producer.send_to("e", 0, &payload).await;
+
+    let reason = rejected
+        .expect_err("accepting this wedges the partition: it fits a produce frame, not a fetch one")
+        .to_string();
     assert!(
-        rejected.is_err(),
-        "accepting this wedges the partition: it fits a produce frame but not a fetch frame"
+        reason.contains("could never be read back"),
+        "the broker should have refused this, but the request failed earlier with: {}",
+        reason
     );
 
     producer.send_to("e", 0, "still works").await.unwrap();
