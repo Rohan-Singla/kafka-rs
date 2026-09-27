@@ -41,23 +41,3 @@ cargo clippy --all-targets                # clean
 cargo fmt --check                         # clean
 ```
 
-## The four things worth being able to explain
-
-If someone asks you about this project in an interview, these are the answers
-that show you understand it rather than just assembled it.
-
-1. **Why the index makes lookups constant time.** Every index entry is exactly
-   16 bytes, so finding offset N is arithmetic, not searching. See
-   [02](02-storage-engine.md).
-
-2. **Why a crash does not corrupt the log.** The log is the source of truth and
-   the index is rebuilt from it, so recovery only ever has one file to trust.
-   See [02](02-storage-engine.md).
-
-3. **Why reads do not block each other.** Every file operation names the byte it
-   acts on instead of moving a shared cursor, which is what lets a read borrow
-   the file immutably. See [06](06-rust-notes.md).
-
-4. **Why fsync is off by default.** A write already survives the broker dying.
-   It does not survive the machine losing power, and closing that gap costs 366x
-   throughput. See [04](04-broker-and-groups.md).
